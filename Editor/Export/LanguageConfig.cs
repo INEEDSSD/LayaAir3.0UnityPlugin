@@ -38,6 +38,12 @@ public class LanguageConfig
     public static string str_Exported;
     public static string str_ExportFailed;
 
+    // ParticleSystem
+    public static string str_UnityInspector;
+    public static string str_LayaInspector;
+    public static string str_clearData;
+    public static string str_particleTips;
+
     public static int language = -1;
 
 
@@ -112,5 +118,11 @@ public class LanguageConfig
         str_Browse = xn.SelectSingleNode("Browse").InnerText;
         str_Exported = xn.SelectSingleNode("Exported").InnerText;
         str_ExportFailed = xn.SelectSingleNode("ExportFailed").InnerText;
+
+        // ParticleSystem
+        str_UnityInspector = xn.SelectSingleNode("UnityInspector").InnerText;
+        str_LayaInspector = xn.SelectSingleNode("LayaInspector").InnerText;
+        str_clearData = xn.SelectSingleNode("clearData").InnerText;
+        str_particleTips = xn.SelectSingleNode("particleTips").InnerText;
     }
 }

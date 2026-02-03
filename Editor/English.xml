@@ -25,4 +25,10 @@
   <Exportaddresscannotbeempty>Export address cannot be empty</Exportaddresscannotbeempty>
   <Exported>Export success</Exported>
   <ExportFailed>Export failed</ExportFailed>
+
+  <!--particleSystem-->
+  <UnityInspector>UnityInspector</UnityInspector>
+  <LayaInspector>LayaAirInspector</LayaInspector>
+  <clearData>clearData</clearData>
+  <particleTips>clear properties laya not support \nthis operate can not undo</particleTips>
 </EnglishLanguage>

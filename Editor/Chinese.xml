@@ -25,5 +25,11 @@
   <Exportaddresscannotbeempty> 导 出 地 址 不 能 为 空</Exportaddresscannotbeempty>
   <Exported>导出成功</Exported>
   <ExportFailed>导出时发生错误</ExportFailed>
+
+  <!--particleSystem-->
+  <UnityInspector>Unity面板</UnityInspector>
+  <LayaInspector>LayaAir面板</LayaInspector>
+  <clearData>清除数据</clearData>
+  <particleTips>清除Laya不支持的属性 \n这个操作不支持撤销</particleTips>
  
 </ChineseLanguage>
