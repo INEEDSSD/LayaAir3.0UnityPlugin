@@ -26,6 +26,14 @@ namespace LayaExport
         }
 
         /// <summary>
+        /// LayaAir粒子系统顶点数量限制
+        /// 在LayaAir中: totalVertexCount = maxParticles * meshVertexCount
+        /// 如果 totalVertexCount > 65535，会抛出异常
+        /// 此限制仅适用于Mesh渲染模式
+        /// </summary>
+        private const int MAX_PARTICLE_VERTEX_COUNT = 65535;
+
+        /// <summary>
         /// 导出粒子系统组件数据到新版格式
         /// </summary>
         /// <param name="gameObject">要导出的GameObject</param>
@@ -40,6 +48,9 @@ namespace LayaExport
                 Debug.LogWarning("LayaAir3D: GameObject does not have ParticleSystem or ParticleSystemRenderer component.");
                 return null;
             }
+            
+            // 检查粒子顶点数量限制 - 暂时关闭
+            // CheckParticleVertexLimit(ps, psr, gameObject.name);
 
             JSONObject comp = new JSONObject(JSONObject.Type.OBJECT);
             comp.AddField("_$type", "ShurikenParticleRenderer");
@@ -1074,6 +1085,58 @@ namespace LayaExport
                 tsaObj.AddField("cycles", tsa.cycleCount);
 
             particleSystem.AddField("textureSheetAnimation", tsaObj);
+        }
+
+        #endregion
+
+        #region Validation Methods
+
+        /// <summary>
+        /// 检查粒子系统顶点数量是否超过LayaAir限制
+        /// 只检查Mesh渲染模式的粒子系统
+        /// </summary>
+        private static void CheckParticleVertexLimit(ParticleSystem ps, ParticleSystemRenderer psr, string objectName)
+        {
+            // 只有Mesh渲染模式才需要检查顶点限制
+            if (psr.renderMode != ParticleSystemRenderMode.Mesh)
+            {
+                return;
+            }
+            
+            // 没有Mesh则不需要检查
+            if (psr.mesh == null)
+            {
+                return;
+            }
+            
+            int maxParticles = ps.main.maxParticles;
+            int meshVertexCount = psr.mesh.vertexCount;
+            int totalVertexCount = maxParticles * meshVertexCount;
+            
+            if (totalVertexCount > MAX_PARTICLE_VERTEX_COUNT)
+            {
+                // 计算建议的最大粒子数
+                int suggestedMaxParticles = MAX_PARTICLE_VERTEX_COUNT / meshVertexCount;
+                
+                string warningMessage = string.Format(
+                    "LayaAir3D Warning: 粒子系统 '{0}' (Mesh模式) 的顶点数量超过LayaAir限制!\n" +
+                    "当前配置: maxParticles={1}, Mesh顶点数={2}, 总顶点数={3}\n" +
+                    "LayaAir限制: 总顶点数不能超过 {4}\n" +
+                    "建议: 将 maxParticles 减少到 {5} 或以下，或者使用顶点数更少的Mesh",
+                    objectName, maxParticles, meshVertexCount, totalVertexCount, 
+                    MAX_PARTICLE_VERTEX_COUNT, suggestedMaxParticles);
+                
+                Debug.LogWarning(warningMessage);
+                
+                // 同时在编辑器中显示对话框提醒用户
+                if (!Application.isBatchMode)
+                {
+                    EditorUtility.DisplayDialog(
+                        "LayaAir3D 粒子导出警告",
+                        warningMessage,
+                        "我知道了");
+                }
+            }
         }
 
         #endregion

@@ -31,4 +31,20 @@
   <LayaInspector>LayaAirInspector</LayaInspector>
   <clearData>clearData</clearData>
   <particleTips>clear properties laya not support \nthis operate can not undo</particleTips>
+
+  <!--Custom Shader-->
+  <CustomShaderSetting> Custom Shader Setting</CustomShaderSetting>
+  <EnableCustomShaderExport> Enable Custom Shader Auto Export</EnableCustomShaderExport>
+  <CustomShaderTips>When enabled, the plugin will automatically detect and export custom shader materials that are not built-in supported. The system will automatically convert Unity shader properties to LayaAir format.</CustomShaderTips>
+
+  <!--Export Progress-->
+  <ExportInit>Initializing...</ExportInit>
+  <ExportScene>Processing scene: {0}</ExportScene>
+  <ExportFile>Exporting file ({0}/{1}): {2}</ExportFile>
+  <ExportCleanup>Cleaning up...</ExportCleanup>
+
+  <!--Particle System Warning-->
+  <ParticleVertexWarningTitle>LayaAir3D Particle Export Warning</ParticleVertexWarningTitle>
+  <ParticleVertexWarning>Particle system '{0}' vertex count exceeds LayaAir limit!\nCurrent config: maxParticles={1}, vertices per particle={2}, total vertices={3}\nLayaAir limit: total vertices cannot exceed {4}\nSuggestion: Reduce maxParticles to {5} or below, or simplify the Mesh model</ParticleVertexWarning>
+  <ParticleVertexWarningOK>OK</ParticleVertexWarningOK>
 </EnglishLanguage>

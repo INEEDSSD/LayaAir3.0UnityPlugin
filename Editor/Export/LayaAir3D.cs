@@ -12,6 +12,7 @@ public class LayaAir3D : EditorWindow
     private static bool GameObjectSetting;
     public static bool MeshSetting;
     private static bool OtherSetting;
+    private static bool CustomShaderSetting;
 
     public static bool Scenes;
     public static int sceneIndex;
@@ -170,6 +171,41 @@ public class LayaAir3D : EditorWindow
             GUILayout.EndHorizontal();
         }
 
+
+        //??
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(21);
+        GUILayout.Box("", GUILayout.Height(1), GUILayout.Width(position.width - 60));
+        GUILayout.EndHorizontal();
+
+        //---------------------------------------CustomShaderSetting------------------------------------------
+        GUILayout.Space(10);
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(21);
+        CustomShaderSetting = EditorGUILayout.Foldout(CustomShaderSetting, LanguageConfig.str_CustomShaderSetting, true);
+        GUILayout.EndHorizontal();
+        if (CustomShaderSetting)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Space(21);
+            GUILayout.Label("", GUILayout.Width(15));
+            GUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+
+            // 启用自定义Shader导出（自动转换未配置的Shader）
+            ExportConfig.EnableCustomShaderExport = GUILayout.Toggle(ExportConfig.EnableCustomShaderExport, LanguageConfig.str_EnableCustomShaderExport);
+            
+            if (ExportConfig.EnableCustomShaderExport)
+            {
+                GUILayout.Space(5);
+                
+                // 提示信息
+                EditorGUILayout.HelpBox(LanguageConfig.str_CustomShaderTips, MessageType.Info);
+            }
+
+            GUILayout.EndVertical();
+            GUILayout.EndHorizontal();
+        }
 
         //??
         GUILayout.BeginHorizontal();

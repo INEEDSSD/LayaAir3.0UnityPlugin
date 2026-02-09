@@ -95,6 +95,20 @@ internal class ResoureMap
 
     public TextureFile GetTextureFile(Texture texture, bool isNormal)
     {
+        // 检查纹理是否为空
+        if (texture == null)
+        {
+            return null;
+        }
+        
+        // 检查是否可以转换为Texture2D
+        Texture2D texture2D = texture as Texture2D;
+        if (texture2D == null)
+        {
+            Debug.LogWarning($"LayaAir3D: Texture '{texture.name}' is not a Texture2D, skipping export.");
+            return null;
+        }
+        
         string picturePath = AssetsUtil.GetTextureFile(texture);
         
         // 检查是否是 Unity 内置资源，内置资源无法导出
@@ -105,7 +119,7 @@ internal class ResoureMap
         
         if (!this.HaveFileData(picturePath))
         {
-            this.AddExportFile(new TextureFile(picturePath,texture as Texture2D, isNormal));
+            this.AddExportFile(new TextureFile(picturePath, texture2D, isNormal));
         }
         return this.GetFileData(picturePath) as TextureFile;
     }
@@ -161,11 +175,23 @@ internal class ResoureMap
 
     public void SaveAllFile()
     {
+        int totalFiles = exportFiles.Count;
+        int currentFile = 0;
+        
         foreach (var file in exportFiles)
         {
+            currentFile++;
+            // 显示保存进度 (从30%到90%)
+            float progress = 0.3f + (0.6f * currentFile / totalFiles);
+            EditorUtility.DisplayProgressBar(LanguageConfig.str_LayaAirExport, 
+                string.Format(LanguageConfig.str_ExportFile, currentFile, totalFiles, file.Key), progress);
+            
             file.Value.SaveFile(exportFiles);
         }
 
+        // 清理阶段 (90%到100%)
+        EditorUtility.DisplayProgressBar(LanguageConfig.str_LayaAirExport, LanguageConfig.str_ExportCleanup, 0.95f);
+        
         foreach (var file in exportFiles)
         {
             if(file.Value is PerfabFile){

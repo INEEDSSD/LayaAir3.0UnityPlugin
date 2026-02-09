@@ -29,6 +29,9 @@ public class ExportConfig
     //导出地址
     private static string _SAVEPATH = "Assets";
 
+    //启用自定义Shader导出
+    private static bool _EnableCustomShaderExport = false;
+
     //场景 or 预制体
     public static int FirstlevelMenu
     {
@@ -176,6 +179,19 @@ public class ExportConfig
         }
     }
 
+    //启用自定义Shader导出
+    public static bool EnableCustomShaderExport
+    {
+        get { return _EnableCustomShaderExport; }
+        set
+        {
+            if (_EnableCustomShaderExport != value)
+            {
+                _EnableCustomShaderExport = value;
+                _updateConfig = true;
+            }
+        }
+    }
 
     public static string SavePath()
     {
@@ -209,6 +225,11 @@ public class ExportConfig
         CustomizeDirectory = bool.Parse(xn.SelectSingleNode("CustomizeDirectory").InnerText);
         CustomizeDirectoryName = xn.SelectSingleNode("CustomizeDirectoryName").InnerText;
         _SAVEPATH = xn.SelectSingleNode("SavePath").InnerText;
+        
+        // 自定义Shader配置
+        if (xn.SelectSingleNode("EnableCustomShaderExport") != null)
+            EnableCustomShaderExport = bool.Parse(xn.SelectSingleNode("EnableCustomShaderExport").InnerText);
+        
         _updateConfig = false;
     }
     public static void saveConfiguration()
@@ -233,6 +254,11 @@ public class ExportConfig
         xn.SelectSingleNode("CustomizeDirectory").InnerText = CustomizeDirectory.ToString();
         xn.SelectSingleNode("CustomizeDirectoryName").InnerText = CustomizeDirectoryName;
         xn.SelectSingleNode("SavePath").InnerText = SAVEPATH;
+        
+        // 自定义Shader配置
+        if (xn.SelectSingleNode("EnableCustomShaderExport") != null)
+            xn.SelectSingleNode("EnableCustomShaderExport").InnerText = EnableCustomShaderExport.ToString();
+        
         xmlDoc.Save(configUrl);
     }
 
@@ -254,5 +280,6 @@ public class ExportConfig
         CustomizeDirectory = false;
         CustomizeDirectoryName = "";
         _SAVEPATH = "Assets";
+        EnableCustomShaderExport = false;
     }
 }

@@ -44,6 +44,17 @@ public class LanguageConfig
     public static string str_clearData;
     public static string str_particleTips;
 
+    // Custom Shader
+    public static string str_CustomShaderSetting;
+    public static string str_EnableCustomShaderExport;
+    public static string str_CustomShaderTips;
+
+    // Export Progress
+    public static string str_ExportInit;
+    public static string str_ExportScene;
+    public static string str_ExportFile;
+    public static string str_ExportCleanup;
+
     public static int language = -1;
 
 
@@ -124,5 +135,16 @@ public class LanguageConfig
         str_LayaInspector = xn.SelectSingleNode("LayaInspector").InnerText;
         str_clearData = xn.SelectSingleNode("clearData").InnerText;
         str_particleTips = xn.SelectSingleNode("particleTips").InnerText;
+
+        // Custom Shader
+        str_CustomShaderSetting = xn.SelectSingleNode("CustomShaderSetting").InnerText;
+        str_EnableCustomShaderExport = xn.SelectSingleNode("EnableCustomShaderExport").InnerText;
+        str_CustomShaderTips = xn.SelectSingleNode("CustomShaderTips").InnerText;
+
+        // Export Progress
+        str_ExportInit = xn.SelectSingleNode("ExportInit").InnerText;
+        str_ExportScene = xn.SelectSingleNode("ExportScene").InnerText;
+        str_ExportFile = xn.SelectSingleNode("ExportFile").InnerText;
+        str_ExportCleanup = xn.SelectSingleNode("ExportCleanup").InnerText;
     }
 }

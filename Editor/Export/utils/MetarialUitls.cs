@@ -583,10 +583,23 @@ internal class MetarialUitls
     public static void WriteMetarial(Material material, JSONObject jsonData, ResoureMap resoureMap)
     {
         string shaderName = material.shader.name;
-        if (!MaterialPropsConfigs.ContainsKey(shaderName)) {
-            FileUtil.setStatuse(false);
-            Debug.LogErrorFormat(material, "LayaAir3D Warning : not get the shader config " + shaderName);
-            return;
+        
+        // 检查是否有内置配置
+        if (!MaterialPropsConfigs.ContainsKey(shaderName))
+        {
+            // 没有内置配置，检查是否启用了自定义Shader导出
+            if (ExportConfig.EnableCustomShaderExport)
+            {
+                // 自动导出自定义Shader材质
+                CustomShaderExporter.WriteAutoCustomShaderMaterial(material, jsonData, resoureMap);
+                return;
+            }
+            else
+            {
+                FileUtil.setStatuse(false);
+                Debug.LogErrorFormat(material, "LayaAir3D Warning : not get the shader config " + shaderName + ". Enable 'Custom Shader Export' to auto-export custom shaders.");
+                return;
+            }
         }
         
         PropDatasConfig propsData = MaterialPropsConfigs[shaderName];

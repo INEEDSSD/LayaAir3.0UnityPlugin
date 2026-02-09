@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <LayaExportSetting>
   <FirstlevelMenu>0</FirstlevelMenu>
   <IgnoreNotActiveGameObject>False</IgnoreNotActiveGameObject>
@@ -12,4 +12,5 @@
   <CustomizeDirectoryName>
   </CustomizeDirectoryName>
   <SavePath>Choose Your Path !!!</SavePath>
+  <EnableCustomShaderExport>False</EnableCustomShaderExport>
 </LayaExportSetting>

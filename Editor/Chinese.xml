@@ -31,5 +31,21 @@
   <LayaInspector>LayaAir面板</LayaInspector>
   <clearData>清除数据</clearData>
   <particleTips>清除Laya不支持的属性 \n这个操作不支持撤销</particleTips>
+
+  <!--Custom Shader-->
+  <CustomShaderSetting> 自 定 义 Shader 设 置 </CustomShaderSetting>
+  <EnableCustomShaderExport> 启 用 自 定 义 Shader 自 动 导 出</EnableCustomShaderExport>
+  <CustomShaderTips>启用后，插件将自动识别并导出未内置支持的自定义Shader材质。系统会自动将Unity Shader属性转换为LayaAir对应的属性格式。</CustomShaderTips>
+
+  <!--Export Progress-->
+  <ExportInit>正在初始化...</ExportInit>
+  <ExportScene>正在处理场景: {0}</ExportScene>
+  <ExportFile>正在导出文件 ({0}/{1}): {2}</ExportFile>
+  <ExportCleanup>正在清理...</ExportCleanup>
+
+  <!--Particle System Warning-->
+  <ParticleVertexWarningTitle>LayaAir3D 粒子导出警告</ParticleVertexWarningTitle>
+  <ParticleVertexWarning>粒子系统 '{0}' 的顶点数量超过LayaAir限制!\n当前配置: maxParticles={1}, 每粒子顶点数={2}, 总顶点数={3}\nLayaAir限制: 总顶点数不能超过 {4}\n建议: 将 maxParticles 减少到 {5} 或以下，或者简化Mesh模型</ParticleVertexWarning>
+  <ParticleVertexWarningOK>我知道了</ParticleVertexWarningOK>
  
 </ChineseLanguage>

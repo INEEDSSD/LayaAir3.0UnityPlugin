@@ -61,15 +61,64 @@ internal class TextureFile : FileData
         this.getTextureInfo();
     }
 
+    /// <summary>
+    /// 当无法获取TextureImporter时，使用默认值初始化纹理信息
+    /// </summary>
+    private void initDefaultTextureInfo() {
+        this.importFormat = LayaTextureImportFormat.R8G8B8A8;
+        this.hasAlphaChannel = true;
+        
+        var sRGB = !this.isNormal;
+        WrapMode wrapMode = WrapMode.Clamp;
+        
+        // 默认importer数据
+        JSONObject importData = new JSONObject(JSONObject.Type.OBJECT);
+        importData.AddField("sRGB", sRGB);
+        importData.AddField("wrapMode", (int)wrapMode);
+        importData.AddField("generateMipmap", true);
+        importData.AddField("anisoLevel", 1);
+        importData.AddField("alphaChannel", hasAlphaChannel);
+        
+        JSONObject platformDefault = new JSONObject(JSONObject.Type.OBJECT);
+        platformDefault.AddField("format", (int)this.importFormat);
+        importData.AddField("platformDefault", platformDefault);
+        this.m_metaData.AddField("importer", importData);
+        
+        // constructParams
+        this.constructParams.Add(texture != null ? texture.width : 1);
+        this.constructParams.Add(texture != null ? texture.height : 1);
+        this.constructParams.Add((int)LayaTextureFormat.R8G8B8A8);
+        this.constructParams.Add(true); // mipmap
+        this.constructParams.Add(false); // canRead
+        this.constructParams.Add(sRGB);
+        
+        // propertyParams
+        this.propertyParams.AddField("filterMode", 1);
+        this.propertyParams.AddField("wrapModeU", (int)wrapMode);
+        this.propertyParams.AddField("wrapModeV", (int)wrapMode);
+        this.propertyParams.AddField("anisoLevel", 1);
+    }
+
     private void getTextureInfo() {
         this.constructParams = new JSONObject(JSONObject.Type.ARRAY);
         this.propertyParams = new JSONObject(JSONObject.Type.ARRAY);
+
+        // 检查texture是否为空
+        if (texture == null) {
+            FileUtil.setStatuse(false);
+            Debug.LogError(LOGHEAD + "Texture is null, cannot export");
+            initDefaultTextureInfo();
+            return;
+        }
 
         string path = AssetDatabase.GetAssetPath(texture.GetInstanceID());
         TextureImporter import = AssetImporter.GetAtPath(path) as TextureImporter;
         if (import == null) {
             FileUtil.setStatuse(false);
             Debug.LogError(LOGHEAD + path + " can't export   You should check the texture file format");
+            // 使用默认值初始化，避免后续空引用
+            initDefaultTextureInfo();
+            return;
         } else {
             import.textureType = TextureImporterType.Default;
             import.isReadable = true;
