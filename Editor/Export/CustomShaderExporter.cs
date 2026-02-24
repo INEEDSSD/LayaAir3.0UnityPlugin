@@ -49,6 +49,24 @@ public enum LayaMaterialType
 /// </summary>
 internal class CustomShaderExporter
 {
+    // ==================== 混合架构支持 ====================
+
+    // 映射引擎实例
+    private static ShaderMappingEngine mappingEngine = null;
+
+    // 是否使用映射表模式
+    private static bool useMappingTableMode = false;
+
+    // 映射表模式是否已初始化
+    private static bool mappingEngineInitialized = false;
+
+    // 性能统计
+    private static System.Diagnostics.Stopwatch conversionTimer = new System.Diagnostics.Stopwatch();
+    private static long builtInConversionTime = 0;
+    private static long mappingTableConversionTime = 0;
+
+    // ==================== 原有字段 ====================
+
     // 已导出的Shader缓存，避免重复导出
     private static HashSet<string> exportedShaders = new HashSet<string>();
 
@@ -203,7 +221,7 @@ internal class CustomShaderExporter
     /// <summary>
     /// 自动导出自定义Shader材质
     /// </summary>
-    public static void WriteAutoCustomShaderMaterial(Material material, JSONObject jsonData, ResoureMap resoureMap)
+    public static void WriteAutoCustomShaderMaterial(Material material, JSONObject jsonData, ResoureMap resoureMap, MaterialFile materialFile = null)
     {
         if (material == null)
         {
@@ -213,21 +231,21 @@ internal class CustomShaderExporter
 
         Shader shader = material.shader;
         string shaderName = shader.name;
-        
+
         // 生成LayaAir Shader名称（去除路径分隔符，转换为合法名称）
         string layaShaderName = GenerateLayaShaderName(shaderName);
-        
+
         Debug.Log($"LayaAir3D: Exporting custom shader material: {material.name} (Shader: {shaderName} -> {layaShaderName})");
 
         // 导出Shader文件（如果还没导出过）
         if (!exportedShaders.Contains(shaderName))
         {
-            ExportShaderFile(shader, layaShaderName, resoureMap);
+            ExportShaderFile(shader, layaShaderName, resoureMap, materialFile);
             exportedShaders.Add(shaderName);
         }
 
-        // 导出材质文件
-        ExportMaterialFile(material, shader, layaShaderName, jsonData, resoureMap);
+        // 导出材质文件 (⭐ 传递materialFile以支持粒子Mesh模式检测)
+        ExportMaterialFile(material, shader, layaShaderName, jsonData, resoureMap, materialFile);
     }
 
     /// <summary>
@@ -245,57 +263,219 @@ internal class CustomShaderExporter
     /// <summary>
     /// 导出Shader文件
     /// </summary>
-    private static void ExportShaderFile(Shader shader, string layaShaderName, ResoureMap resoureMap)
+    private static void ExportShaderFile(Shader shader, string layaShaderName, ResoureMap resoureMap, MaterialFile materialFile = null)
     {
         // 收集Shader属性
         List<ShaderProperty> properties = CollectShaderProperties(shader);
-        
+
         // 尝试读取Unity Shader源代码
         string shaderPath = AssetDatabase.GetAssetPath(shader);
         string shaderSourceCode = null;
-        
+
         if (!string.IsNullOrEmpty(shaderPath) && File.Exists(shaderPath))
         {
             shaderSourceCode = File.ReadAllText(shaderPath);
             Debug.Log($"LayaAir3D: Read shader source from: {shaderPath}");
         }
-        
+
         // 生成Shader文件内容
         string shaderContent;
         if (!string.IsNullOrEmpty(shaderSourceCode))
         {
-            // 有源代码，进行HLSL到GLSL的转换
-            shaderContent = ConvertUnityShaderToLaya(layaShaderName, properties, shader.name, shaderSourceCode);
+            // 有源代码，进行HLSL到GLSL的转换（ConvertUnityShaderToLaya内部已调用FormatShaderContent）
+            shaderContent = ConvertUnityShaderToLaya(layaShaderName, properties, shader.name, shaderSourceCode, materialFile);
         }
         else
         {
             // 没有源代码，使用模板生成
-            shaderContent = GenerateShaderFileContent(layaShaderName, properties, shader.name);
+            shaderContent = GenerateShaderFileContent(layaShaderName, properties, shader.name, materialFile);
+            // 格式化模板生成的shader内容
+            shaderContent = FormatShaderContent(shaderContent);
         }
-        
-        // 创建Shader文件
-        string outputPath = layaShaderName + ".shader";
+
+        // ⭐ 修复GLSL类型不匹配问题 (v_Texcoord0的vec4/vec2转换)
+        shaderContent = FixShaderTypeMismatch(shaderContent);
+
+        // ⭐ 全面的类型检查和自动修复 (检测所有赋值中的类型不匹配)
+        shaderContent = ComprehensiveTypeCheck(shaderContent);
+
+        // ⭐ 验证shader内容，检测潜在的类型不匹配问题
+        ValidateShaderContent(shaderContent, layaShaderName);
+
+        // 创建Shader文件 - 放置在Shaders文件夹中
+        string outputPath = "Shaders/" + layaShaderName + ".shader";
         ShaderFile shaderFile = new ShaderFile(outputPath, shaderContent);
         resoureMap.AddExportFile(shaderFile);
-        
+
         Debug.Log($"LayaAir3D: Generated shader file: {outputPath} (ShaderType detected from: {shader.name})");
     }
 
     #region HLSL to GLSL Converter
 
     /// <summary>
+    /// 判断shader是否是粒子系统shader（而非mesh shader）
+    /// </summary>
+    private static bool IsParticleShader(LayaMaterialType materialType, string unityShaderName, string sourceCode, MaterialFile materialFile = null)
+    {
+        // ⭐ 优先级1: 检查实际的渲染器组件类型（最准确的方法）
+        if (materialFile != null)
+        {
+            bool usedByParticle = materialFile.IsUsedByParticleSystem();
+            bool usedByMesh = materialFile.IsUsedByMeshRenderer();
+
+            Debug.Log($"LayaAir3D: Checking renderer usage for '{unityShaderName}' - UsedByParticle: {usedByParticle}, UsedByMesh: {usedByMesh}");
+
+            // ⭐ 关键：只要被ParticleSystemRenderer使用，就判定为粒子shader
+            // 即使同时被MeshRenderer使用，粒子系统优先（因为粒子系统的Mesh渲染模式）
+            if (usedByParticle)
+            {
+                Debug.Log($"LayaAir3D: Detected as ParticleShader (Used by ParticleSystemRenderer): {unityShaderName}");
+                return true;
+            }
+
+            // 明确只被MeshRenderer使用
+            if (usedByMesh && !usedByParticle)
+            {
+                Debug.Log($"LayaAir3D: Detected as MeshShader (Only used by MeshRenderer/SkinnedMeshRenderer): {unityShaderName}");
+                return false;
+            }
+
+            // 如果没有任何renderer使用信息（usedByParticle和usedByMesh都为false）
+            // 继续使用后续的启发式检测
+            Debug.Log($"LayaAir3D: No renderer usage info found, using heuristic detection for: {unityShaderName}");
+        }
+        else
+        {
+            Debug.Log($"LayaAir3D: MaterialFile is null, using heuristic detection for: {unityShaderName}");
+        }
+
+        // 优先级2: 明确的粒子材质类型
+        if (materialType == LayaMaterialType.PARTICLESHURIKEN)
+        {
+            Debug.Log($"LayaAir3D: Detected as ParticleShader (MaterialType: PARTICLESHURIKEN)");
+            return true;
+        }
+
+        // 优先级3: shader名称检查
+        string lowerName = unityShaderName.ToLower();
+
+        // 明确包含Particle关键字（最明确的粒子shader标识）
+        if (lowerName.Contains("particle") || lowerName.Contains("shurike") || lowerName.Contains("trail"))
+        {
+            Debug.Log($"LayaAir3D: Detected as ParticleShader (Name contains particle keywords): {unityShaderName}");
+            return true;
+        }
+
+        // Artist_Effect系列是粒子特效shader
+        if (lowerName.Contains("artist") && lowerName.Contains("effect"))
+        {
+            Debug.Log($"LayaAir3D: Detected as ParticleShader (Artist_Effect series): {unityShaderName}");
+            return true;
+        }
+
+        // BR_Effect系列也是粒子特效shader
+        if (lowerName.Contains("br_effect") || lowerName.Contains("breffect"))
+        {
+            Debug.Log($"LayaAir3D: Detected as ParticleShader (BR_Effect series): {unityShaderName}");
+            return true;
+        }
+
+        // 包含"effect"但明确不是mesh shader的特征
+        if (lowerName.Contains("effect"))
+        {
+            // 粒子相关关键字
+            if (lowerName.Contains("particle") ||
+                lowerName.Contains("shurike") ||
+                lowerName.Contains("trail") ||
+                lowerName.Contains("additive") ||
+                lowerName.Contains("alpha blend") ||
+                lowerName.Contains("multiply") ||
+                lowerName.Contains("blend"))
+            {
+                Debug.Log($"LayaAir3D: Detected as ParticleShader (Effect shader with particle keywords): {unityShaderName}");
+                return true;
+            }
+        }
+
+        // 优先级3: 检查源码特征（仅在名称不明确时使用）
+        if (!string.IsNullOrEmpty(sourceCode))
+        {
+            // 粒子shader的明确特征（高优先级）
+            bool hasParticleFeature = sourceCode.Contains("ParticleSystem") ||
+                                     sourceCode.Contains("PARTICLE_") ||
+                                     sourceCode.Contains("Billboard") ||
+                                     sourceCode.Contains("_RENDERMODE_") ||
+                                     sourceCode.Contains("a_DirectionTime") ||
+                                     sourceCode.Contains("a_ShapePosition");
+
+            if (hasParticleFeature)
+            {
+                Debug.Log($"LayaAir3D: Detected as ParticleShader (has particle features in code)");
+                return true;
+            }
+
+            // Mesh shader的明显特征
+            bool hasMeshVertexInput = (sourceCode.Contains(": POSITION") || sourceCode.Contains(": SV_POSITION")) &&
+                                      (sourceCode.Contains(": TEXCOORD") || sourceCode.Contains("TEXCOORD0"));
+
+            // Mesh shader的常见函数调用
+            bool hasMeshFunction = sourceCode.Contains("UnityObjectToClipPos") ||
+                                  sourceCode.Contains("mul(UNITY_MATRIX_MVP") ||
+                                  sourceCode.Contains("mul(unity_MatrixMVP") ||
+                                  sourceCode.Contains("mul(unity_ObjectToWorld");
+
+            // ⭐ 重要：只有在明确是mesh特征，且shader名称不包含effect关键字时，才判定为mesh shader
+            // 因为很多粒子shader也使用标准顶点输入格式
+            if ((hasMeshVertexInput || hasMeshFunction) && !lowerName.Contains("effect"))
+            {
+                Debug.Log($"LayaAir3D: Detected as MeshShader (has mesh features, no effect keyword)");
+                return false;
+            }
+        }
+
+        // 优先级4: Effect类型的默认判定
+        // ⭐ 重要：包含"effect"的shader，默认判定为粒子shader（因为大多数effect shader用于粒子系统）
+        if (lowerName.Contains("effect"))
+        {
+            Debug.Log($"LayaAir3D: Detected as ParticleShader (Effect shader - default to particle): {unityShaderName}");
+            return true;
+        }
+
+        // 5. 其他情况默认为mesh shader
+        Debug.Log($"LayaAir3D: Defaulting to MeshShader (cannot determine)");
+        return false;
+    }
+
+    /// <summary>
     /// 将Unity Shader源代码转换为LayaAir Shader
     /// </summary>
-    private static string ConvertUnityShaderToLaya(string layaShaderName, List<ShaderProperty> properties, 
-        string unityShaderName, string sourceCode)
+    private static string ConvertUnityShaderToLaya(string layaShaderName, List<ShaderProperty> properties,
+        string unityShaderName, string sourceCode, MaterialFile materialFile = null)
     {
         StringBuilder sb = new StringBuilder();
-        
-        // 检测材质类型和ShaderType
+
+        // 检测材质类型
         LayaMaterialType materialType = DetectMaterialType(unityShaderName);
+
+        // 解析Unity Shader代码
+        ShaderParseResult parseResult = ParseUnityShader(sourceCode);
+
+        // 保存properties到parseResult，供后续使用
+        parseResult.properties = properties;
+
+        // ⭐ 关键修复：先检测是否是粒子shader，再确定ShaderType
+        // 这样可以确保粒子shader使用正确的ShaderType (Effect)
+        parseResult.isParticleBillboard = IsParticleShader(materialType, unityShaderName, sourceCode, materialFile);
+
+        // 根据isParticleBillboard结果确定ShaderType
         LayaShaderType shaderType;
-        
-        if (materialType == LayaMaterialType.Custom)
+        if (parseResult.isParticleBillboard)
+        {
+            // 粒子shader统一使用Effect类型
+            shaderType = LayaShaderType.Effect;
+            Debug.Log($"LayaAir3D: Particle shader detected, using ShaderType: Effect");
+        }
+        else if (materialType == LayaMaterialType.Custom)
         {
             shaderType = DetectCustomShaderType(unityShaderName, properties);
         }
@@ -303,20 +483,10 @@ internal class CustomShaderExporter
         {
             shaderType = GetShaderTypeFromMaterialType(materialType);
         }
-        
+
         string shaderTypeStr = GetShaderTypeString(shaderType);
-        
-        Debug.Log($"LayaAir3D: Converting shader '{unityShaderName}' - MaterialType: {materialType}, ShaderType: {shaderType}");
-        
-        // 解析Unity Shader代码
-        ShaderParseResult parseResult = ParseUnityShader(sourceCode);
-        
-        // 检测是否是粒子Billboard模式
-        // Effect类型的shader或名称包含particle/effect的shader使用Billboard模式
-        parseResult.isParticleBillboard = (shaderType == LayaShaderType.Effect) || 
-            materialType == LayaMaterialType.PARTICLESHURIKEN ||
-            unityShaderName.ToLower().Contains("particle") ||
-            unityShaderName.ToLower().Contains("effect");
+
+        Debug.Log($"LayaAir3D: Converting shader '{unityShaderName}' - MaterialType: {materialType}, ShaderType: {shaderType}, IsParticle: {parseResult.isParticleBillboard}");
         
         // ==================== Shader3D 配置块 ====================
         sb.AppendLine("Shader3D Start");
@@ -337,9 +507,10 @@ internal class CustomShaderExporter
         GenerateDefinesFromParseResult(sb, parseResult);
         sb.AppendLine("    },");
         
-        // attributeMap - 粒子shader需要声明粒子系统的顶点属性
+        // attributeMap - 根据shader类型声明不同的顶点属性
         if (parseResult.isParticleBillboard)
         {
+            // 粒子shader的attributeMap
             sb.AppendLine("    attributeMap: {");
             sb.AppendLine("        a_DirectionTime: Vector4,");
             sb.AppendLine("        a_MeshPosition: Vector3,");
@@ -357,6 +528,38 @@ internal class CustomShaderExporter
             sb.AppendLine("        a_SimulationWorldPostion: Vector3,");
             sb.AppendLine("        a_SimulationWorldRotation: Vector4,");
             sb.AppendLine("        a_SimulationUV: Vector4");
+            sb.AppendLine("    },");
+        }
+        else
+        {
+            // Mesh shader的attributeMap（标准mesh属性）
+            sb.AppendLine("    attributeMap: {");
+            sb.AppendLine("        a_Position: Vector3,");
+            sb.AppendLine("        a_Normal: Vector3,");
+            sb.AppendLine("        a_Color: Vector4,");
+            sb.AppendLine("        a_Texcoord0: Vector2,");
+
+            // 如果有自定义数据，添加UV1
+            bool hasCustomData = false;
+            foreach (var prop in properties)
+            {
+                if (prop.unityName.Contains("CustomData") || prop.unityName.Contains("_Custom"))
+                {
+                    hasCustomData = true;
+                    break;
+                }
+            }
+
+            if (hasCustomData)
+            {
+                sb.AppendLine("        a_Tangent0: Vector4,");
+                sb.AppendLine("        a_Texcoord1: Vector2");
+            }
+            else
+            {
+                sb.AppendLine("        a_Tangent0: Vector4");
+            }
+
             sb.AppendLine("    },");
         }
         
@@ -386,8 +589,230 @@ internal class CustomShaderExporter
         // 验证和清理生成的代码
         string result = sb.ToString();
         result = ValidateAndCleanGLSL(result);
-        
+
+        // 格式化shader内容
+        result = FormatShaderContent(result);
+
+        // 生成转换总结报告
+        GenerateConversionSummary(parseResult, properties, result);
+
         return result;
+    }
+
+    /// <summary>
+    /// 生成shader转换总结报告
+    /// </summary>
+    private static void GenerateConversionSummary(ShaderParseResult parseResult, List<ShaderProperty> properties, string resultCode)
+    {
+        Debug.Log("==================== Shader Export Summary ====================");
+        Debug.Log($"Shader Name: {parseResult.shaderName}");
+        Debug.Log($"Shader Type: {(parseResult.isParticleBillboard ? "Particle System" : "Mesh Effect")}");
+
+        // 架构模式信息
+        if (useMappingTableMode)
+        {
+            Debug.Log($"Architecture: Hybrid (Mapping Table Mode)");
+            Debug.Log($"  └─ Mapping table rules applied first");
+            Debug.Log($"  └─ Built-in rules as fallback");
+        }
+        else
+        {
+            Debug.Log($"Architecture: Built-in (Hardcoded Rules Mode)");
+            Debug.Log($"  └─ All rules from C# code");
+        }
+
+        Debug.Log("");
+
+        // 统计信息
+        int propertyCount = properties != null ? properties.Count : 0;
+        int defineCount = parseResult.shaderFeatures.Count + parseResult.multiCompiles.Count;
+        int varyingCount = parseResult.collectedVaryings != null ? parseResult.collectedVaryings.Count : 0;
+        int codeLines = resultCode.Split('\n').Length;
+
+        Debug.Log($"Properties: {propertyCount}");
+        Debug.Log($"Defines: {defineCount}");
+        Debug.Log($"Varyings: {varyingCount}");
+        Debug.Log($"Total Lines: {codeLines}");
+        Debug.Log("");
+
+        // 功能检测
+        Debug.Log("Detected Features:");
+        List<string> features = new List<string>();
+
+        if (HasPropertyByName(parseResult, "DetailTex2")) features.Add("✓ 3-Layer Textures");
+        else if (HasPropertyByName(parseResult, "DetailTex")) features.Add("✓ 2-Layer Textures");
+        else features.Add("✓ Single Texture");
+
+        if (HasPropertyByName(parseResult, "Dissolve")) features.Add("✓ Dissolve Effect");
+        if (HasPropertyByName(parseResult, "FadeEdge")) features.Add("✓ Fade Edge");
+        if (HasPropertyByName(parseResult, "Distort")) features.Add("✓ Distortion");
+        if (HasPropertyByName(parseResult, "Rim")) features.Add("✓ Rim Lighting");
+        if (HasPropertyByName(parseResult, "Lighting") || HasPropertyByName(parseResult, "MainLight")) features.Add("✓ Custom Lighting");
+        if (HasPropertyByName(parseResult, "VertexOffset") || HasPropertyByName(parseResult, "VertexAmplitude")) features.Add("✓ Vertex Offset");
+        if (HasPropertyByName(parseResult, "Rotate") || HasPropertyByName(parseResult, "RotateAngle")) features.Add("✓ UV Rotation");
+        if (HasPropertyByName(parseResult, "Scroll")) features.Add("✓ UV Scrolling");
+        if (HasPropertyByName(parseResult, "NormalMap")) features.Add("✓ Normal Mapping");
+        if (HasPropertyByName(parseResult, "CustomData")) features.Add("✓ Custom Data");
+        if (HasPropertyByName(parseResult, "Polar")) features.Add("✓ Polar Coordinates");
+        if (HasPropertyByName(parseResult, "GradientMap")) features.Add("✓ Gradient Remap");
+
+        foreach (var feature in features)
+        {
+            Debug.Log($"  {feature}");
+        }
+
+        if (features.Count == 0)
+        {
+            Debug.Log("  (No special effects detected)");
+        }
+
+        Debug.Log("");
+
+        // 警告和建议
+        List<string> warnings = new List<string>();
+        List<string> suggestions = new List<string>();
+
+        if (resultCode.Contains("vec3(0.0)") || resultCode.Contains("vec4(0.0)"))
+        {
+            warnings.Add("⚠ Hardcoded zero vectors detected - mesh may not be visible");
+        }
+
+        if (!parseResult.isParticleBillboard && !resultCode.Contains("vertex.positionOS"))
+        {
+            warnings.Add("⚠ Mesh shader does not use vertex.positionOS - may have positioning issues");
+        }
+
+        if (varyingCount == 0)
+        {
+            warnings.Add("⚠ No varyings detected - VS to FS data passing may not work");
+        }
+
+        if (varyingCount > 16)
+        {
+            suggestions.Add("ℹ Many varyings ({varyingCount}) - consider optimizing to reduce interpolator usage");
+        }
+
+        if (propertyCount > 50)
+        {
+            suggestions.Add($"ℹ Many properties ({propertyCount}) - shader may be complex");
+        }
+
+        if (parseResult.isParticleBillboard && resultCode.Contains("Particle.shader template not found"))
+        {
+            warnings.Add("⚠ Particle template not found - using fallback code (may be incomplete)");
+        }
+
+        if (warnings.Count > 0)
+        {
+            Debug.Log("Warnings:");
+            foreach (var warning in warnings)
+            {
+                Debug.LogWarning($"  {warning}");
+            }
+            Debug.Log("");
+        }
+
+        if (suggestions.Count > 0)
+        {
+            Debug.Log("Suggestions:");
+            foreach (var suggestion in suggestions)
+            {
+                Debug.Log($"  {suggestion}");
+            }
+            Debug.Log("");
+        }
+
+        // 转换率估计
+        int estimatedConversionRate = EstimateConversionRate(parseResult, resultCode);
+        string rateColor = estimatedConversionRate >= 80 ? "Good" :
+                          estimatedConversionRate >= 60 ? "Fair" : "Poor";
+
+        Debug.Log($"Estimated Conversion Rate: ~{estimatedConversionRate}% ({rateColor})");
+        Debug.Log("");
+
+        // 性能统计
+        if (useMappingTableMode)
+        {
+            Debug.Log("Performance:");
+            Debug.Log($"  Mapping Table: {mappingTableConversionTime}ms");
+            if (builtInConversionTime > 0)
+            {
+                Debug.Log($"  Built-in Fallback: {builtInConversionTime}ms");
+                Debug.Log($"  Total: {mappingTableConversionTime + builtInConversionTime}ms");
+            }
+            Debug.Log("");
+        }
+        else
+        {
+            Debug.Log("Performance:");
+            Debug.Log($"  Built-in Conversion: {builtInConversionTime}ms");
+            Debug.Log("");
+        }
+
+        if (estimatedConversionRate < 80)
+        {
+            Debug.Log("Note: Conversion rate below 80% - manual adjustment may be needed");
+            Debug.Log("Please test the exported shader in LayaAir and verify rendering");
+        }
+        else
+        {
+            Debug.Log("Shader export looks good! Test in LayaAir to confirm");
+        }
+
+        Debug.Log("===============================================================");
+    }
+
+    /// <summary>
+    /// 估算shader转换率
+    /// </summary>
+    private static int EstimateConversionRate(ShaderParseResult parseResult, string resultCode)
+    {
+        int score = 100;
+
+        // 基础检查
+        if (parseResult.isParticleBillboard)
+        {
+            // 粒子shader检查
+            if (!resultCode.Contains("computeParticlePosition") && !resultCode.Contains("center"))
+                score -= 30; // 缺少粒子位置计算
+
+            if (!resultCode.Contains("computeParticleColor") && !resultCode.Contains("v_Color"))
+                score -= 10; // 缺少粒子颜色
+
+            if (!resultCode.Contains("Billboard") && !resultCode.Contains("corner"))
+                score -= 15; // 缺少Billboard计算
+        }
+        else
+        {
+            // Mesh shader检查
+            if (!resultCode.Contains("vertex.positionOS") && !resultCode.Contains("a_Position"))
+                score -= 40; // 缺少顶点位置
+
+            if (resultCode.Contains("vec3(0.0)") || resultCode.Contains("vec4(0.0)"))
+                score -= 20; // 有硬编码零向量
+
+            if (!resultCode.Contains("getWorldMatrix") && !resultCode.Contains("worldMat"))
+                score -= 15; // 缺少世界变换
+        }
+
+        // 通用检查
+        if (parseResult.collectedVaryings == null || parseResult.collectedVaryings.Count == 0)
+            score -= 15; // 没有varying
+
+        if (!resultCode.Contains("gl_Position"))
+            score -= 25; // 缺少位置输出
+
+        if (!resultCode.Contains("gl_FragColor") && !resultCode.Contains("out"))
+            score -= 10; // 缺少颜色输出
+
+        // Unity特有函数未转换
+        if (resultCode.Contains("UnityObjectToClipPos"))
+            score -= 10;
+
+        if (resultCode.Contains("UNITY_MATRIX"))
+            score -= 5;
+
+        return Math.Max(0, Math.Min(100, score));
     }
 
     /// <summary>
@@ -413,6 +838,7 @@ internal class CustomShaderExporter
         public bool isParticleBillboard = false;  // 是否是粒子Billboard模式
         public Dictionary<string, string> collectedVaryings = new Dictionary<string, string>(); // 收集到的所有varying（VS生成后传递给FS）
         public string varyingDeclarations = "";  // VS生成的varying声明字符串，FS直接复用
+        public List<ShaderProperty> properties = new List<ShaderProperty>(); // Shader属性列表
     }
 
     /// <summary>
@@ -777,38 +1203,53 @@ internal class CustomShaderExporter
     {
         // 场景相关 (SceneCommon.glsl)
         "u_Time", "u_FogParams", "u_FogColor", "u_GIRotate", "u_DirationLightCount",
-        
+
         // 相机相关 (CameraCommon.glsl)
         "u_CameraPos", "u_View", "u_Projection", "u_ViewProjection",
         "u_CameraDirection", "u_CameraUp", "u_Viewport", "u_ProjectionParams",
         "u_OpaqueTextureParams", "u_ZBufferParams",
         "u_CameraDepthTexture", "u_CameraDepthNormalsTexture", "u_CameraOpaqueTexture",
-        
+
         // 精灵/物体相关 (Sprite3DCommon.glsl)
         "u_WorldMat", "u_WorldInvertFront",
-        
+
         // 光照相关 (Lighting.glsl)
         "u_DirLightColor", "u_DirLightDirection", "u_DirLightMode",
         "u_PointLightColor", "u_PointLightPos", "u_PointLightRange", "u_PointLightMode",
         "u_SpotLightColor", "u_SpotLightPos", "u_SpotLightDirection", "u_SpotLightRange", "u_SpotLightSpot", "u_SpotLightMode",
         "u_LightBuffer", "u_LightClusterBuffer",
-        
+
         // 阴影相关 (ShadowCommon.glsl)
         "u_ShadowLightDirection", "u_ShadowBias", "u_ShadowSplitSpheres", "u_ShadowMatrices",
         "u_ShadowMapSize", "u_ShadowParams", "u_SpotShadowMapSize", "u_SpotViewProjectMatrix",
         "u_ShadowMap", "u_SpotShadowMap",
-        
+
         // 全局光照相关 (globalIllumination.glsl)
         "u_AmbientColor", "u_IblSH", "u_IBLTex", "u_IBLRoughnessLevel", "u_AmbientIntensity", "u_ReflectionIntensity",
         "u_AmbientSHAr", "u_AmbientSHAg", "u_AmbientSHAb", "u_AmbientSHBr", "u_AmbientSHBg", "u_AmbientSHBb", "u_AmbientSHC",
         "u_ReflectTexture", "u_ReflectCubeHDRParams",
         "u_LightMap", "u_LightMapDirection", "u_LightmapScaleOffset",
         "u_SpecCubeProbePosition", "u_SpecCubeBoxMax", "u_SpecCubeBoxMin",
-        
+
         // 体积光照探针 (VolumetricGI.glsl)
         "u_VolGIProbeCounts", "u_VolGIProbeStep", "u_VolGIProbeStartPosition", "u_VolGIProbeParams",
         "u_ProbeIrradiance", "u_ProbeDistance",
-        
+
+        // 粒子系统相关 (particleShuriKenSpriteVS.glsl)
+        // ⭐ 这些uniform由particleShuriKenSpriteVS.glsl提供，不要在uniformMap中重复声明
+        "u_CurrentTime", "u_Gravity", "u_DragConstanct",
+        "u_WorldPosition", "u_WorldRotation",
+        "u_ScalingMode", "u_PositionScale", "u_SizeScale", "u_SimulationSpace",
+        "u_VOLSpaceType", "u_VOLVelocityConst", "u_VOLVelocityConstMax",
+        // Gradient相关的uniform也由particleShuriKenSpriteVS.glsl提供
+        "u_ColorOverLifeGradientAlphas", "u_ColorOverLifeGradientColors", "u_ColorOverLifeGradientRanges",
+        "u_MaxColorOverLifeGradientAlphas", "u_MaxColorOverLifeGradientColors", "u_MaxColorOverLifeGradientRanges",
+        "u_SOLSizeGradient", "u_SOLSizeGradientMax",
+        "u_SOLSizeGradientX", "u_SOLSizeGradientY", "u_SOLSizeGradientZ",
+        "u_SOLSizeGradientMaxX", "u_SOLSizeGradientMaxY", "u_SOLSizeGradientMaxZ",
+        "u_VOLVelocityGradientX", "u_VOLVelocityGradientY", "u_VOLVelocityGradientZ",
+        "u_VOLVelocityGradientMaxX", "u_VOLVelocityGradientMaxY", "u_VOLVelocityGradientMaxZ",
+
         // Unity RenderPipeline特有，Laya粒子不需要
         "u_Stencil", "u_StencilComp", "u_StencilOp", "u_StencilReadMask", "u_StencilWriteMask", "u_ColorMask"
     };
@@ -887,6 +1328,103 @@ internal class CustomShaderExporter
                 addedProps.Add(stName);
             }
         }
+
+        // ⭐ 添加Scroll相关uniforms（如果检测到有Scroll属性或者是粒子shader）
+        // 这些uniforms在GenerateParticleVertexCode中会被使用
+        if (parseResult.isParticleBillboard || HasPropertyByName(parseResult, "Scroll"))
+        {
+            // 基础Scroll uniforms (Layer 0)
+            if (!addedProps.Contains("u_Scroll0X"))
+            {
+                sb.AppendLine($"        u_Scroll0X: {{ type: Float, default: 0.0 }},");
+                addedProps.Add("u_Scroll0X");
+            }
+            if (!addedProps.Contains("u_Scroll0Y"))
+            {
+                sb.AppendLine($"        u_Scroll0Y: {{ type: Float, default: 0.0 }},");
+                addedProps.Add("u_Scroll0Y");
+            }
+
+            // Scroll1 uniforms (Layer 1) - 如果有Scroll1或DetailTex属性
+            if (HasPropertyByName(parseResult, "Scroll1") || HasPropertyByName(parseResult, "DetailTex"))
+            {
+                if (!addedProps.Contains("u_Scroll1X"))
+                {
+                    sb.AppendLine($"        u_Scroll1X: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_Scroll1X");
+                }
+                if (!addedProps.Contains("u_Scroll1Y"))
+                {
+                    sb.AppendLine($"        u_Scroll1Y: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_Scroll1Y");
+                }
+            }
+
+            // Scroll2 uniforms (Layer 2) - 如果有Scroll2或DetailTex2属性
+            if (HasPropertyByName(parseResult, "Scroll2") || HasPropertyByName(parseResult, "DetailTex2"))
+            {
+                if (!addedProps.Contains("u_Scroll2X"))
+                {
+                    sb.AppendLine($"        u_Scroll2X: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_Scroll2X");
+                }
+                if (!addedProps.Contains("u_Scroll2Y"))
+                {
+                    sb.AppendLine($"        u_Scroll2Y: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_Scroll2Y");
+                }
+            }
+
+            // Distort Scroll uniforms - 如果有Distort0属性
+            if (HasPropertyByName(parseResult, "Distort0"))
+            {
+                if (!addedProps.Contains("u_Distort0X"))
+                {
+                    sb.AppendLine($"        u_Distort0X: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_Distort0X");
+                }
+                if (!addedProps.Contains("u_Distort0Y"))
+                {
+                    sb.AppendLine($"        u_Distort0Y: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_Distort0Y");
+                }
+            }
+
+            // DissolveDistort Scroll uniforms - 如果有DissolveDistort属性
+            if (HasPropertyByName(parseResult, "DissolveDistort"))
+            {
+                if (!addedProps.Contains("u_DissolveDistortX"))
+                {
+                    sb.AppendLine($"        u_DissolveDistortX: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_DissolveDistortX");
+                }
+                if (!addedProps.Contains("u_DissolveDistortY"))
+                {
+                    sb.AppendLine($"        u_DissolveDistortY: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_DissolveDistortY");
+                }
+            }
+
+            // VertexAmplitudeTex Scroll uniforms - 如果有VertexAmplitudeTex属性
+            if (HasPropertyByName(parseResult, "VertexAmplitudeTex"))
+            {
+                if (!addedProps.Contains("u_VertexAmplitudeTexScroll0X"))
+                {
+                    sb.AppendLine($"        u_VertexAmplitudeTexScroll0X: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_VertexAmplitudeTexScroll0X");
+                }
+                if (!addedProps.Contains("u_VertexAmplitudeTexScroll0Y"))
+                {
+                    sb.AppendLine($"        u_VertexAmplitudeTexScroll0Y: {{ type: Float, default: 0.0 }},");
+                    addedProps.Add("u_VertexAmplitudeTexScroll0Y");
+                }
+            }
+        }
+
+        // ⭐ 不需要手动添加粒子系统uniforms
+        // 所有粒子系统相关的uniform（u_CurrentTime, u_Gravity, u_WorldPosition等）
+        // 都由particleShuriKenSpriteVS.glsl提供，已添加到EngineBuiltInUniforms列表中
+        // 重复声明会导致编译错误
     }
 
     /// <summary>
@@ -896,9 +1434,13 @@ internal class CustomShaderExporter
     {
         HashSet<string> addedDefines = new HashSet<string>();
         
-        // 粒子shader使用TINTCOLOR/ADDTIVEFOG（参考Particle.shader模板），非粒子使用COLOR/ENABLEVERTEXCOLOR
+        // 粒子shader使用TINTCOLOR/ADDTIVEFOG/RENDERMODE_MESH（参考Particle.shader模板），非粒子使用COLOR/ENABLEVERTEXCOLOR
         if (parseResult.isParticleBillboard)
         {
+            // ⭐ 粒子mesh模式：添加RENDERMODE_MESH define（用于区分mesh和billboard模式）
+            sb.AppendLine("        RENDERMODE_MESH: { type: bool, default: false },");
+            addedDefines.Add("RENDERMODE_MESH");
+
             sb.AppendLine("        TINTCOLOR: { type: bool, default: true },");
             addedDefines.Add("TINTCOLOR");
             sb.AppendLine("        ADDTIVEFOG: { type: bool, default: true },");
@@ -947,10 +1489,13 @@ internal class CustomShaderExporter
             }
         }
         
+        // 从properties推断defines
+        InferDefinesFromProperties(sb, parseResult, addedDefines);
+
         // 添加常用的defines（可能在代码中使用）
         // 粒子Effect shader常用：LAYERTYPE_ONE/TWO/THREE, WRAPMODE_DEFAULT/CLAMP/REPEAT
-        string[] commonDefines = { 
-            "LAYERTYPE_ONE", "LAYERTYPE_TWO", "LAYERTYPE_THREE", 
+        string[] commonDefines = {
+            "LAYERTYPE_ONE", "LAYERTYPE_TWO", "LAYERTYPE_THREE",
             "WRAPMODE_DEFAULT", "WRAPMODE_CLAMP", "WRAPMODE_REPEAT", "WRAPMODE_MIRROR",
             "USERIM", "USERIMMAP", "USENPR", "EMISSION", "USELIGHTING",
             "USEVERTEXOFFSET", "USEDISSOLVE", "USEFADEEDGE", "USEDISTORT0",
@@ -976,12 +1521,140 @@ internal class CustomShaderExporter
                         break;
                     }
                 }
-                
+
                 if (usedInCode)
                 {
                     sb.AppendLine($"        {def}: {{ type: bool, default: false }},");
                     addedDefines.Add(def);
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 从properties推断需要的defines
+    /// </summary>
+    private static void InferDefinesFromProperties(StringBuilder sb, ShaderParseResult parseResult, HashSet<string> addedDefines)
+    {
+        HashSet<string> inferredDefines = new HashSet<string>();
+
+        foreach (var prop in parseResult.properties)
+        {
+            string propName = prop.unityName.ToLower();
+
+            // Layer相关（纹理叠加）
+            if (propName.Contains("detailtex2"))
+            {
+                inferredDefines.Add("LAYERTYPE_THREE");
+                inferredDefines.Add("LAYERTYPE_TWO");
+                inferredDefines.Add("LAYERTYPE_ONE");
+            }
+            else if (propName.Contains("detailtex"))
+            {
+                inferredDefines.Add("LAYERTYPE_TWO");
+                inferredDefines.Add("LAYERTYPE_ONE");
+            }
+
+            // Dissolve相关
+            if (propName.Contains("dissolve"))
+            {
+                inferredDefines.Add("USEDISSOLVE");
+                if (propName.Contains("fadeedge"))
+                    inferredDefines.Add("USEFADEEDGE");
+                if (propName.Contains("dissolvedistort"))
+                    inferredDefines.Add("USEDISSOLVEDISTORT");
+            }
+
+            // Distort相关（扭曲）
+            if (propName.Contains("distorttex") && !propName.Contains("dissolve"))
+            {
+                inferredDefines.Add("USEDISTORT0");
+            }
+
+            // Rim相关（边缘光）
+            if (propName.Contains("rim"))
+            {
+                inferredDefines.Add("USERIM");
+                if (propName.Contains("rimmap") && !propName.Contains("mask"))
+                    inferredDefines.Add("USERIMMAP");
+            }
+
+            // Lighting相关
+            if (propName.Contains("effectmainlight") || propName.Contains("lighting"))
+            {
+                inferredDefines.Add("USELIGHTING");
+            }
+
+            // 顶点位移
+            if (propName.Contains("vertexoffset") || propName.Contains("vertexamplitude"))
+            {
+                inferredDefines.Add("USEVERTEXOFFSET");
+            }
+
+            // 旋转
+            if (propName.Contains("rotateangle"))
+            {
+                if (propName.Contains("02"))
+                    inferredDefines.Add("ROTATIONTEXTWO");
+                else if (propName.Contains("03"))
+                    inferredDefines.Add("ROTATIONTEXTHREE");
+                else if (propName.Contains("04"))
+                    inferredDefines.Add("ROTATIONTEXFOUR");
+                else if (!propName.Contains("0")) // 基础rotation，排除02/03/04
+                    inferredDefines.Add("ROTATIONTEX");
+            }
+
+            // Polar Coordinates
+            if (propName.Contains("polar"))
+            {
+                inferredDefines.Add("USEPOLAR");
+            }
+
+            // GradientMap
+            if (propName.Contains("gradientmap"))
+            {
+                inferredDefines.Add("USEGRADIENTMAP0");
+            }
+
+            // NormalMap for Rim
+            if (propName.Contains("normaltexture") || (propName.Contains("normalmap") && propName.Contains("rim")))
+            {
+                inferredDefines.Add("USENORMALMAPFORRIM");
+            }
+
+            // CustomData
+            if (propName.Contains("customdata"))
+            {
+                inferredDefines.Add("USECUSTOMDATA");
+            }
+
+            // WrapMode
+            if (propName.Contains("wrapmode"))
+            {
+                inferredDefines.Add("WRAPMODE_CLAMP");
+                inferredDefines.Add("WRAPMODE_REPEAT");
+            }
+
+            // NPR (Non-Photorealistic Rendering)
+            if (propName.Contains("medcolor") || propName.Contains("shadowthreshold"))
+            {
+                inferredDefines.Add("USENPR");
+            }
+
+            // Emission (自发光)
+            if (propName.Contains("emission"))
+            {
+                inferredDefines.Add("EMISSION");
+            }
+        }
+
+        // 输出推断出的defines
+        foreach (var def in inferredDefines.OrderBy(d => d))
+        {
+            if (!addedDefines.Contains(def))
+            {
+                sb.AppendLine($"        {def}: {{ type: bool, default: false }},");
+                addedDefines.Add(def);
             }
         }
     }
@@ -1017,22 +1690,46 @@ internal class CustomShaderExporter
     private static string NormalizeDefineName(string feature)
     {
         string cleanFeature = feature.Trim();
-        
+
         // 跳过空的或者__开头的内部宏
         if (string.IsNullOrEmpty(cleanFeature) || cleanFeature.StartsWith("__"))
             return null;
-        
+
+        // ⭐ 修复：跳过以#开头的非法标识符（如#pragma、#include等）
+        if (cleanFeature.StartsWith("#"))
+            return null;
+
+        // ⭐ 修复：跳过pragma指令的参数关键词（这些不是defines）
+        string[] pragmaKeywords = {
+            "pragma", "include", "define", "ifdef", "ifndef", "endif",
+            "vertex", "fragment", "geometry", "hull", "domain",
+            "target", "only_renderers", "exclude_renderers",
+            "multi_compile", "shader_feature", "require",
+            "skip_variants", "hardware_tier_variants",
+            // 平台名称
+            "xbox360", "xboxone", "ps3", "ps4", "ps5", "psp2",
+            "n3ds", "wiiu", "switch", "gles", "gles3",
+            "metal", "vulkan", "d3d9", "d3d11", "d3d12",
+            "glcore", "xboxseries", "ps5", "stadia"
+        };
+        string lowerFeature = cleanFeature.ToLower();
+        foreach (var keyword in pragmaKeywords)
+        {
+            if (lowerFeature == keyword || lowerFeature.Contains(keyword + "_"))
+                return null;
+        }
+
         // 移除前导下划线
         if (cleanFeature.StartsWith("_"))
             cleanFeature = cleanFeature.Substring(1);
-        
+
         // 处理_ON后缀
         if (cleanFeature.EndsWith("_ON"))
             cleanFeature = cleanFeature.Substring(0, cleanFeature.Length - 3);
-        
+
         // 跳过常见的Unity内部宏
-        string[] skipMacros = { 
-            "INSTANCING", "PROCEDURAL", "DOTS", "STEREO", 
+        string[] skipMacros = {
+            "INSTANCING", "PROCEDURAL", "DOTS", "STEREO",
             "FOG_LINEAR", "FOG_EXP", "FOG_EXP2",
             "SHADOWS_SCREEN", "SHADOWS_SOFT", "SHADOWS_HARD"
         };
@@ -1041,7 +1738,7 @@ internal class CustomShaderExporter
             if (cleanFeature.Contains(skip))
                 return null;
         }
-        
+
         return cleanFeature;
     }
 
@@ -1138,10 +1835,73 @@ internal class CustomShaderExporter
             string convertedFunc = ConvertHLSLFunction(func);
             ExtractVaryingsFromCode(convertedFunc, allVaryings);
         }
-        
+
+        // ⭐ 关键修复：如果是粒子shader，添加粒子专用的varying
+        // ParticleShaderTemplate使用的varying: v_Color, v_TextureCoordinate, v_ScreenPos, v_Texcoord0
+        // 这些varying不会从Unity代码中提取（因为粒子shader使用ParticleShaderTemplate，不使用Unity转换代码）
+        if (parseResult.isParticleBillboard)
+        {
+            Debug.Log("LayaAir3D: Adding particle-specific varyings");
+
+            // 添加粒子专用的varying（如果还没有）
+            if (!allVaryings.ContainsKey("v_Color"))
+            {
+                allVaryings["v_Color"] = "vec4";
+                Debug.Log("LayaAir3D: Added varying vec4 v_Color");
+            }
+
+            if (!allVaryings.ContainsKey("v_TextureCoordinate"))
+            {
+                allVaryings["v_TextureCoordinate"] = "vec2";
+                Debug.Log("LayaAir3D: Added varying vec2 v_TextureCoordinate");
+            }
+
+            if (!allVaryings.ContainsKey("v_ScreenPos"))
+            {
+                allVaryings["v_ScreenPos"] = "vec4";
+                Debug.Log("LayaAir3D: Added varying vec4 v_ScreenPos");
+            }
+
+            // ⭐ 关键修复：粒子mesh模式需要v_MeshColor传递顶点颜色
+            if (!allVaryings.ContainsKey("v_MeshColor"))
+            {
+                allVaryings["v_MeshColor"] = "vec4";
+                Debug.Log("LayaAir3D: Added varying vec4 v_MeshColor for particle mesh mode");
+            }
+
+            // ⭐ 关键修复：粒子shader需要v_Texcoord0为vec4（用于Scroll功能的.zw分量）
+            if (!allVaryings.ContainsKey("v_Texcoord0"))
+            {
+                allVaryings["v_Texcoord0"] = "vec4";
+                Debug.Log("LayaAir3D: Added varying vec4 v_Texcoord0 for particle shader");
+            }
+            else if (allVaryings["v_Texcoord0"] == "vec2")
+            {
+                // 如果已经存在但是vec2，强制改为vec4
+                allVaryings["v_Texcoord0"] = "vec4";
+                Debug.Log("LayaAir3D: Changed v_Texcoord0 from vec2 to vec4 for particle shader");
+            }
+
+            // ⭐ 优化：移除粒子shader不需要的varying
+            // v_PositionCS和v_PositionWS来自Unity mesh shader，粒子shader中从未使用
+            // v_Texcoord2/3/8用于法线贴图（TBN矩阵），仅在USELIGHTING时需要
+            // v_Texcoord7用于自定义数据，仅在USECUSTOMDATA时需要
+            // 保留这些varying的声明，但它们可能不会被赋值（除非启用相应的特性）
+
+            string[] unusedVaryingsForParticles = { "v_PositionCS", "v_PositionWS" };
+            foreach (var unusedVarying in unusedVaryingsForParticles)
+            {
+                if (allVaryings.ContainsKey(unusedVarying))
+                {
+                    allVaryings.Remove(unusedVarying);
+                    Debug.Log($"LayaAir3D: Removed unused varying for particle shader: {unusedVarying}");
+                }
+            }
+        }
+
         // 保存到parseResult，供FS使用
         parseResult.collectedVaryings = allVaryings;
-        
+
         // 开始生成shader
         sb.AppendLine($"#defineGLSL {shaderName}VS");
         sb.AppendLine($"    #define SHADER_NAME {shaderName}");
@@ -1151,8 +1911,18 @@ internal class CustomShaderExporter
         if (parseResult.isParticleBillboard)
         {
             // 粒子shader的VS includes（参考Particle.shader模板）
+
+            // ⭐ 包含particleShuriKenSpriteVS.glsl以获得正确的uniform和宏声明
+            // 这个include提供了：
+            // 1. gradient函数所需的uniform（Buffer类型等）
+            // 2. COLORCOUNT和COLORCOUNT_HALF宏定义
+            // 必须在MathGradient.glsl之前include
             sb.AppendLine("    #include \"Camera.glsl\";");
             sb.AppendLine("    #include \"particleShuriKenSpriteVS.glsl\";");
+            sb.AppendLine();
+
+            // ⭐ 不需要手动定义COLORCOUNT宏，particleShuriKenSpriteVS.glsl已经定义了
+
             sb.AppendLine("    #include \"Math.glsl\";");
             sb.AppendLine("    #include \"MathGradient.glsl\";");
             sb.AppendLine("    #include \"Color.glsl\";");
@@ -1175,7 +1945,7 @@ internal class CustomShaderExporter
         StringBuilder varyingSb = new StringBuilder();
         GenerateVaryingDeclarationsFromDict(varyingSb, allVaryings);
         parseResult.varyingDeclarations = varyingSb.ToString();
-        
+
         // 粒子shader：顶点颜色varying统一为v_Color（参考i.vcolor->v_Color）
         if (parseResult.isParticleBillboard)
         {
@@ -1195,6 +1965,21 @@ internal class CustomShaderExporter
                 }
             }
             parseResult.varyingDeclarations = string.Join("\n", uniqueLines) + "\n";
+
+            // ⭐ 在去重后，将v_MeshColor用条件编译包裹（参考AI版本shader）
+            // 格式：紧凑，没有空行，v_MeshColor在所有varying之后
+            if (parseResult.varyingDeclarations.Contains("varying vec4 v_MeshColor"))
+            {
+                // 移除v_MeshColor所在行（包括前后空行）
+                string declWithoutMeshColor = Regex.Replace(parseResult.varyingDeclarations,
+                    @"\n?\s*varying\s+vec4\s+v_MeshColor\s*;\n?", "");
+
+                // 在末尾添加条件编译版本（紧凑格式）
+                parseResult.varyingDeclarations = declWithoutMeshColor +
+                    "\n#ifdef RENDERMODE_MESH\n    varying vec4 v_MeshColor;\n#endif\n";
+
+                Debug.Log("LayaAir3D: Wrapped v_MeshColor with conditional compilation (moved to end)");
+            }
         }
         
         Debug.Log($"[VS] allVaryings.Count = {allVaryings.Count}");
@@ -1203,14 +1988,36 @@ internal class CustomShaderExporter
         
         sb.Append(parseResult.varyingDeclarations);
         sb.AppendLine();
-        
+
+        // ⭐ 关键修复：粒子函数库必须在main函数之前添加（全局作用域）
+        // 在GLSL中，不能在main()函数内部定义其他函数
+        if (parseResult.isParticleBillboard)
+        {
+            // 粒子shader：添加粒子函数库（在main之前）
+            try
+            {
+                Debug.Log("LayaAir3D: Adding particle function library (before main function)");
+                sb.Append(ParticleShaderTemplate.GetParticleVertexFunctions());
+                sb.AppendLine();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"LayaAir3D: Failed to add particle functions: {e.Message}");
+            }
+        }
+        else
+        {
+            // Mesh shader：添加必要的辅助函数（transformUV等）
+            GenerateHelperFunctions(sb, parseResult);
+        }
+
         // 添加转换后的自定义函数
         foreach (var func in convertedFunctions)
         {
             sb.AppendLine(IndentCode(func, "    "));
             sb.AppendLine();
         }
-        
+
         // 生成main函数
         sb.AppendLine("    void main()");
         sb.AppendLine("    {");
@@ -1223,23 +2030,39 @@ internal class CustomShaderExporter
             sb.AppendLine();
         }
         
-        // 添加转换后的顶点着色器代码
-        if (!string.IsNullOrEmpty(convertedVertCode))
+        // ⭐ 关键修复：如果是粒子shader，强制使用ParticleShaderTemplate，不使用转换后的mesh代码
+        // 即使Unity源码被成功解析，Unity的Artist_Effect shader使用mesh inputs (POSITION, TEXCOORD0)
+        // 但在LayaAir中必须使用粒子Billboard代码（a_DirectionTime, a_ShapePositionStartLifeTime等）
+        if (parseResult.isParticleBillboard)
         {
+            // 粒子shader：强制使用ParticleShaderTemplate，不使用转换后的Unity代码
+            Debug.Log("LayaAir3D: Particle shader detected - using ParticleShaderTemplate (ignoring Unity converted code)");
+            GenerateParticleVertexCode(sb, parseResult);
+        }
+        else if (!string.IsNullOrEmpty(convertedVertCode))
+        {
+            // Mesh shader：使用转换后的Unity代码
             sb.AppendLine(IndentCode(convertedVertCode, "        "));
         }
         else
         {
-            // 默认顶点处理
-            GenerateDefaultVertexCode(sb, parseResult);
+            // Mesh shader：没有Unity代码，使用默认mesh代码
+            GenerateMeshVertexCode(sb, parseResult);
         }
-        
+
         sb.AppendLine();
-        sb.AppendLine("        gl_Position = remapPositionZ(gl_Position);");
-        sb.AppendLine();
-        sb.AppendLine("    #ifdef FOG");
-        sb.AppendLine("        FogHandle(gl_Position.z);");
-        sb.AppendLine("    #endif");
+
+        // ⭐ 优化：粒子shader的ParticleShaderTemplate已经包含remapPositionZ和FogHandle
+        // 避免重复添加，只对非粒子shader添加这些调用
+        if (!parseResult.isParticleBillboard)
+        {
+            sb.AppendLine("        gl_Position = remapPositionZ(gl_Position);");
+            sb.AppendLine();
+            sb.AppendLine("    #ifdef FOG");
+            sb.AppendLine("        FogHandle(gl_Position.z);");
+            sb.AppendLine("    #endif");
+        }
+
         sb.AppendLine("    }");
         sb.AppendLine("#endGLSL");
         sb.AppendLine();
@@ -1350,7 +2173,17 @@ internal class CustomShaderExporter
             // 默认片元处理
             GenerateDefaultFragmentCode(sb, parseResult);
         }
-        
+
+        // ⭐ 粒子系统mesh模式：在最终输出前乘以mesh顶点颜色（参考AI版本shader）
+        if (parseResult.isParticleBillboard)
+        {
+            sb.AppendLine();
+            sb.AppendLine("    #ifdef RENDERMODE_MESH");
+            sb.AppendLine("        // Multiply by mesh vertex color in mesh mode");
+            sb.AppendLine("        gl_FragColor *= v_MeshColor;");
+            sb.AppendLine("    #endif");
+        }
+
         sb.AppendLine();
         sb.AppendLine("    #ifdef FOG");
         sb.AppendLine("        gl_FragColor.rgb = scenUnlitFog(gl_FragColor.rgb);");
@@ -1485,8 +2318,16 @@ internal class CustomShaderExporter
         }
         
         // 5. 添加基本varying（确保始终存在）
+        // ⭐ 修复：粒子shader需要v_Texcoord0为vec4（用于.zw存储滚动UV）
         if (!varyings.ContainsKey("v_Texcoord0"))
-            varyings["v_Texcoord0"] = "vec2";
+        {
+            // 粒子shader或者使用了Scroll相关的shader都需要vec4
+            bool needsVec4 = parseResult.isParticleBillboard ||
+                            HasPropertyByName(parseResult, "Scroll") ||
+                            parseResult.vertexCode.Contains("u_Scroll0X") ||
+                            parseResult.vertexCode.Contains("u_Scroll0Y");
+            varyings["v_Texcoord0"] = needsVec4 ? "vec4" : "vec2";
+        }
         if (!varyings.ContainsKey("v_VertexColor"))
             varyings["v_VertexColor"] = "vec4";
         if (!varyings.ContainsKey("v_PositionWS"))
@@ -1495,7 +2336,7 @@ internal class CustomShaderExporter
             varyings["v_PositionCS"] = "vec4";
         if (!varyings.ContainsKey("v_ScreenPos"))
             varyings["v_ScreenPos"] = "vec4";
-        
+
         return varyings;
     }
 
@@ -1523,13 +2364,36 @@ internal class CustomShaderExporter
     {
         if (varyings == null || varyings.Count == 0)
             return;
-            
-        // 按名称排序以确保VS和FS输出顺序一致
+
+        // ⭐ 按名称排序，但v_MeshColor要放在最后（参考AI辅助转换的shader）
         var sortedVaryings = varyings.OrderBy(kvp => kvp.Key).ToList();
-        
+
+        // 分离v_MeshColor
+        string meshColorType = null;
+        var normalVaryings = new List<KeyValuePair<string, string>>();
+
         foreach (var kvp in sortedVaryings)
         {
+            if (kvp.Key == "v_MeshColor")
+            {
+                meshColorType = kvp.Value;
+            }
+            else
+            {
+                normalVaryings.Add(kvp);
+            }
+        }
+
+        // 先输出所有普通varying
+        foreach (var kvp in normalVaryings)
+        {
             sb.AppendLine($"    varying {kvp.Value} {kvp.Key};");
+        }
+
+        // 最后输出v_MeshColor（不带条件编译，后续处理）
+        if (meshColorType != null)
+        {
+            sb.AppendLine($"    varying {meshColorType} v_MeshColor;");
         }
     }
 
@@ -1607,21 +2471,670 @@ internal class CustomShaderExporter
     /// </summary>
     private static void GenerateDefaultVertexCode(StringBuilder sb, ShaderParseResult parseResult)
     {
+        if (parseResult.isParticleBillboard)
+        {
+            // 粒子系统：使用Particle.shader模板的完整代码
+            GenerateParticleVertexCode(sb, parseResult);
+        }
+        else
+        {
+            // 标准Mesh：生成mesh shader的顶点代码
+            GenerateMeshVertexCode(sb, parseResult);
+        }
+    }
+
+    /// <summary>
+    /// 生成辅助函数（transformUV等）
+    /// </summary>
+    private static void GenerateHelperFunctions(StringBuilder sb, ShaderParseResult parseResult)
+    {
+        // 检查是否需要transformUV函数（在顶点偏移、UV变换等场景中使用）
+        bool needsTransformUV = HasPropertyByName(parseResult, "VertexAmplitude") ||
+                                HasPropertyByName(parseResult, "VertexOffset") ||
+                                HasPropertyByName(parseResult, "_ST");
+
+        if (needsTransformUV)
+        {
+            sb.AppendLine("    // UV变换辅助函数");
+            sb.AppendLine("    vec2 transformUV(vec2 uv, vec4 tilingOffset) {");
+            sb.AppendLine("        return uv * tilingOffset.xy + tilingOffset.zw;");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+        }
+
+        // 检查是否需要UV旋转函数
+        bool needsRotateUV = HasPropertyByName(parseResult, "Rotate") ||
+                            HasPropertyByName(parseResult, "RotateAngle");
+
+        if (needsRotateUV)
+        {
+            sb.AppendLine("    // UV旋转辅助函数");
+            sb.AppendLine("    vec2 rotateUV(vec2 uv, float centerX, float centerY, float angle) {");
+            sb.AppendLine("        float rad = angle * 0.01745329; // degrees to radians");
+            sb.AppendLine("        float cosAngle = cos(rad);");
+            sb.AppendLine("        float sinAngle = sin(rad);");
+            sb.AppendLine("        vec2 center = vec2(centerX, centerY);");
+            sb.AppendLine("        vec2 delta = uv - center;");
+            sb.AppendLine("        mat2 rotMat = mat2(cosAngle, -sinAngle, sinAngle, cosAngle);");
+            sb.AppendLine("        return (rotMat * delta) + center;");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+        }
+
+        // 检查是否需要Polar坐标转换
+        bool needsPolar = HasPropertyByName(parseResult, "Polar") ||
+                         HasPropertyByName(parseResult, "UsePolar");
+
+        if (needsPolar)
+        {
+            sb.AppendLine("    // Polar坐标转换函数");
+            sb.AppendLine("    vec2 polarCoordinates(vec2 uv, vec2 center, float radialScale, float lengthScale) {");
+            sb.AppendLine("        vec2 delta = uv - center;");
+            sb.AppendLine("        float radius = length(delta) * 2.0 * radialScale;");
+            sb.AppendLine("        float angle = atan(delta.x, delta.y) * (1.0 / 6.28318530718) * lengthScale;");
+            sb.AppendLine("        return vec2(radius, angle);");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+        }
+    }
+
+    /// <summary>
+    /// 生成Mesh shader的顶点代码
+    /// </summary>
+    private static void GenerateMeshVertexCode(StringBuilder sb, ShaderParseResult parseResult)
+    {
+        // ⭐ 简化版：只生成基本的mesh变换代码
+        // 根据实际的varying来决定需要生成哪些代码
+
+        sb.AppendLine("        vec3 positionOS = vertex.positionOS;");
+        sb.AppendLine();
+
+        // 顶点偏移处理（如果有）
+        if (HasPropertyByName(parseResult, "VertexOffset") || HasPropertyByName(parseResult, "VertexAmplitude"))
+        {
+            sb.AppendLine("    #ifdef USEVERTEXOFFSET");
+            sb.AppendLine("        // 顶点偏移效果");
+            sb.AppendLine("        vec4 vertexAmplitudeTex = texture2D(u_VertexAmplitudeTex, ");
+            sb.AppendLine("            transformUV(vertex.texCoord0, u_VertexAmplitudeTex_ST) + ");
+            sb.AppendLine("            fract(vec2(u_VertexAmplitudeTexScroll0X, u_VertexAmplitudeTexScroll0Y) * u_Time));");
+            sb.AppendLine("        vec4 vertexAmplitudeMaskTex = texture2D(u_VertexAmplitudeMaskTex, ");
+            sb.AppendLine("            transformUV(vertex.texCoord0, u_VertexAmplitudeMaskTex_ST));");
+            sb.AppendLine();
+            sb.AppendLine("        if (u_VertexOffsetMode == 1.0) {");
+            sb.AppendLine("            // axis mode - 沿任意方向偏移");
+            sb.AppendLine("            positionOS += u_VertexAmplitude * (2.0 * vertexAmplitudeTex.rgb - 1.0) * vertexAmplitudeMaskTex.r;");
+            sb.AppendLine("        } else {");
+            sb.AppendLine("            // normal mode - 沿法线方向偏移");
+            sb.AppendLine("            positionOS += vertex.normalOS * u_VertexAmplitude * vertexAmplitudeTex.r * vertexAmplitudeMaskTex.r;");
+            sb.AppendLine("        }");
+            sb.AppendLine("    #endif");
+            sb.AppendLine();
+        }
+
+        // 标准mesh变换
         sb.AppendLine("        mat4 worldMat = getWorldMatrix();");
-        sb.AppendLine("        vec4 pos = worldMat * vec4(vertex.positionOS, 1.0);");
-        sb.AppendLine("        v_PositionWS = pos.xyz / pos.w;");
+        sb.AppendLine("        vec4 positionWS = worldMat * vec4(positionOS, 1.0);");
+
+        // 只在有v_PositionWS varying时才生成赋值
+        if (parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_PositionWS"))
+        {
+            sb.AppendLine("        v_PositionWS = positionWS.xyz / positionWS.w;");
+            sb.AppendLine();
+            sb.AppendLine("        gl_Position = getPositionCS(v_PositionWS);");
+        }
+        else
+        {
+            sb.AppendLine("        gl_Position = getPositionCS(positionWS.xyz / positionWS.w);");
+        }
+
+        // 只在有v_PositionCS varying时才生成赋值
+        if (parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_PositionCS"))
+        {
+            sb.AppendLine("        v_PositionCS = gl_Position;");
+        }
+
+        // 只在有v_ScreenPos varying时才生成赋值
+        if (parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_ScreenPos"))
+        {
+            sb.AppendLine("        v_ScreenPos = gl_Position * 0.5 + vec4(0.5 * gl_Position.w);");
+        }
         sb.AppendLine();
-        sb.AppendLine("    #ifdef UV");
-        sb.AppendLine("        v_Texcoord0 = transformUV(vertex.texCoord0, u_TilingOffset);");
-        sb.AppendLine("    #endif");
+
+        // UV坐标 - 根据v_Texcoord0的类型决定如何赋值
+        if (parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_Texcoord0"))
+        {
+            string texcoordType = parseResult.collectedVaryings["v_Texcoord0"];
+            if (texcoordType == "vec4")
+            {
+                // vec4类型，可以同时存储两套UV
+                sb.AppendLine("        // UV坐标");
+                sb.AppendLine("        v_Texcoord0.xy = vertex.texCoord0;");
+                sb.AppendLine("        v_Texcoord0.zw = vec2(0.0); // 预留");
+            }
+            else if (texcoordType == "vec2")
+            {
+                // vec2类型，只存储一套UV
+                sb.AppendLine("        // UV坐标");
+                sb.AppendLine("        v_Texcoord0 = vertex.texCoord0;");
+            }
+            sb.AppendLine();
+        }
+
+        // 顶点颜色 - 使用正确的varying名称
+        if (parseResult.collectedVaryings != null)
+        {
+            if (parseResult.collectedVaryings.ContainsKey("v_Color"))
+            {
+                sb.AppendLine("        // 顶点颜色");
+                sb.AppendLine("        v_Color = vertex.vertexColor;");
+                sb.AppendLine();
+            }
+            else if (parseResult.collectedVaryings.ContainsKey("v_VertexColor"))
+            {
+                sb.AppendLine("        // 顶点颜色");
+                sb.AppendLine("        v_VertexColor = vertex.vertexColor;");
+                sb.AppendLine();
+            }
+        }
+
+        // 法线和切线（用于Rim和光照）- 只在需要时生成
+        if (HasPropertyByName(parseResult, "Rim") || HasPropertyByName(parseResult, "Lighting") ||
+            HasPropertyByName(parseResult, "NormalMap"))
+        {
+            sb.AppendLine("        // 法线变换");
+            sb.AppendLine("        mat3 normalMat = transpose(inverse(mat3(worldMat)));");
+            sb.AppendLine();
+
+            // 只在对应的varying存在时才生成代码
+            bool hasTexcoord3 = parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_Texcoord3");
+            bool hasTexcoord2 = parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_Texcoord2");
+            bool hasTexcoord8 = parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_Texcoord8");
+
+            if (hasTexcoord3 || hasTexcoord2 || hasTexcoord8)
+            {
+                sb.AppendLine("    #ifdef USENORMALMAPFORRIM");
+                sb.AppendLine("        vec3 normalWorld = normalize(normalMat * vertex.normalOS);");
+                sb.AppendLine("        vec3 tangentWorld = normalize((worldMat * vec4(vertex.tangentOS.xyz, 0.0)).xyz);");
+                sb.AppendLine("        float tangentSign = vertex.tangentOS.w;");
+                sb.AppendLine("        vec3 binormalWorld = cross(normalWorld, tangentWorld) * tangentSign;");
+                if (hasTexcoord3) sb.AppendLine("        v_Texcoord3 = normalWorld;");
+                if (hasTexcoord8) sb.AppendLine("        v_Texcoord8 = tangentWorld;");
+                sb.AppendLine("    #endif");
+                sb.AppendLine();
+
+                if (hasTexcoord2)
+                {
+                    sb.AppendLine("    #ifdef USERIM");
+                    sb.AppendLine("        #ifdef USENORMALMAPFORRIM");
+                    sb.AppendLine("            v_Texcoord2 = binormalWorld;");
+                    sb.AppendLine("        #else");
+                    sb.AppendLine("            // 视空间法线（用于Rim效果）");
+                    sb.AppendLine("            mat3 viewIT = transpose(inverse(mat3(u_View * worldMat)));");
+                    sb.AppendLine("            v_Texcoord2 = normalize(viewIT * vertex.normalOS);");
+                    sb.AppendLine("        #endif");
+                    sb.AppendLine("    #endif");
+                    sb.AppendLine();
+                }
+
+                if (hasTexcoord3)
+                {
+                    sb.AppendLine("    #ifdef USELIGHTING");
+                    sb.AppendLine("        v_Texcoord3 = normalize(normalMat * vertex.normalOS);");
+                    sb.AppendLine("    #endif");
+                    sb.AppendLine();
+                }
+            }
+        }
+
+        // UV滚动（多层纹理）- 只在对应varying存在时生成
+        bool hasTexcoord4 = parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_Texcoord4");
+        if (hasTexcoord4)
+        {
+            sb.AppendLine("    #if defined(LAYERTYPE_TWO) || defined(LAYERTYPE_THREE)");
+            sb.AppendLine("        v_Texcoord4.xy = fract(vec2(u_Scroll1X, u_Scroll1Y) * u_Time);");
+            sb.AppendLine("    #endif");
+            sb.AppendLine();
+            sb.AppendLine("    #ifdef LAYERTYPE_THREE");
+            sb.AppendLine("        v_Texcoord4.zw = fract(vec2(u_Scroll2X, u_Scroll2Y) * u_Time);");
+            sb.AppendLine("    #endif");
+            sb.AppendLine();
+        }
+
+        // Distort UV滚动 - 只在对应varying存在时生成
+        bool hasTexcoord6 = parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_Texcoord6");
+        if (hasTexcoord6)
+        {
+            sb.AppendLine("    #ifdef USEDISTORT0");
+            sb.AppendLine("        v_Texcoord6.xy = fract(vec2(u_Distort0X, u_Distort0Y) * u_Time);");
+            sb.AppendLine("    #endif");
+            sb.AppendLine();
+            sb.AppendLine("    #ifdef USEDISSOLVEDISTORT");
+            sb.AppendLine("        v_Texcoord6.zw = fract(vec2(u_DissolveDistortX, u_DissolveDistortY) * u_Time);");
+            sb.AppendLine("    #endif");
+            sb.AppendLine();
+        }
+
+        // UV旋转预计算 - 只在对应varying存在时生成
+        bool hasTexcoord9 = parseResult.collectedVaryings != null && parseResult.collectedVaryings.ContainsKey("v_Texcoord9");
+        if (hasTexcoord9 && (HasPropertyByName(parseResult, "Rotation") || HasPropertyByName(parseResult, "RotateAngle")))
+        {
+            sb.AppendLine("    #ifdef ROTATIONTEX");
+            sb.AppendLine("        float rad1 = u_RotateAngle * 0.01745329;");
+            sb.AppendLine("        v_Texcoord9.x = cos(rad1);");
+            sb.AppendLine("        v_Texcoord9.y = sin(rad1);");
+            sb.AppendLine("    #endif");
+            sb.AppendLine();
+            sb.AppendLine("    #ifdef ROTATIONTEXTWO");
+            sb.AppendLine("        float rad2 = u_RotateAngle02 * 0.01745329;");
+            sb.AppendLine("        v_Texcoord9.z = cos(rad2);");
+            sb.AppendLine("        v_Texcoord9.w = sin(rad2);");
+            sb.AppendLine("    #endif");
+            sb.AppendLine();
+        }
+
+        // ⭐ 移除CustomData处理 - 这需要a_Texcoord1属性，但简单shader没有
+        // 只有明确需要CustomData且attributeMap中有a_Texcoord1时才处理
+        // if (HasPropertyByName(parseResult, "CustomData"))
+        // {
+        //     sb.AppendLine("    #ifdef USECUSTOMDATA");
+        //     sb.AppendLine("        v_Texcoord7.xy = vertex.texCoord0.zw;  // CustomData from UV0.zw");
+        //     sb.AppendLine("        v_Texcoord7.zw = vertex.texCoord1;     // CustomData from UV1.xy");
+        //     sb.AppendLine("    #endif");
+        //     sb.AppendLine();
+        // }
+    }
+
+    /// <summary>
+    /// 生成粒子系统顶点代码（使用Particle.shader模板）
+    /// 注意：只生成main函数的body，不生成函数定义（函数定义已在main之前添加）
+    /// </summary>
+    private static void GenerateParticleVertexCode(StringBuilder sb, ShaderParseResult parseResult)
+    {
+        // ⭐ 使用ParticleShaderTemplate（最可靠的方法）
+        // 注意：函数库已经在main函数之前添加过了，这里只添加main函数body
+        try
+        {
+            Debug.Log("LayaAir3D: Generating particle main function body from ParticleShaderTemplate");
+
+            // ⭐ 关键：不再添加函数库（已在main之前添加）
+            // sb.Append(ParticleShaderTemplate.GetParticleVertexFunctions());  // ← 注释掉
+
+            // 获取完整的main函数
+            string mainFunc = ParticleShaderTemplate.GetParticleVertexMainFunction();
+
+            // 移除main函数的开头声明（因为外层已经有了void main() {）
+            if (mainFunc.Contains("void main()"))
+            {
+                int bodyStart = mainFunc.IndexOf("{");
+                if (bodyStart != -1)
+                {
+                    // 提取main函数体内容（不包括void main()和最外层的{}）
+                    int bodyEnd = mainFunc.LastIndexOf("}");
+                    if (bodyEnd > bodyStart)
+                    {
+                        mainFunc = mainFunc.Substring(bodyStart + 1, bodyEnd - bodyStart - 1);
+                    }
+                }
+            }
+
+            // 添加main函数body（已经正确缩进）
+            sb.AppendLine(mainFunc);
+
+            // 添加特效相关的varying赋值
+            AddEffectVaryingAssignments(sb, parseResult);
+
+            Debug.Log("LayaAir3D: Successfully generated particle main body using ParticleShaderTemplate");
+            return;
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"LayaAir3D: Failed to use ParticleShaderTemplate: {e.Message}");
+            Debug.LogWarning($"LayaAir3D: Stack trace: {e.StackTrace}");
+            Debug.LogWarning("LayaAir3D: Falling back to template file extraction");
+        }
+
+        // Fallback 1: 尝试从Particle.shader模板文件读取
+        string[] possiblePaths = new string[]
+        {
+            Path.Combine(Application.dataPath, "LayaAir3.0UnityPlugin/template/Particle.shader"),
+            Path.Combine(Application.dataPath.Replace("/Assets", ""), "Assets/LayaAir3.0UnityPlugin/template/Particle.shader"),
+            Path.Combine(Directory.GetCurrentDirectory(), "template/Particle.shader"),
+            Path.Combine(Directory.GetCurrentDirectory(), "Assets/LayaAir3.0UnityPlugin/template/Particle.shader")
+        };
+
+        string particleTemplatePath = null;
+        string particleVSCode = null;
+
+        // 尝试所有可能的路径
+        foreach (var path in possiblePaths)
+        {
+            if (File.Exists(path))
+            {
+                particleTemplatePath = path;
+                Debug.Log($"LayaAir3D: Found Particle.shader template file at: {path}");
+                break;
+            }
+        }
+
+        if (particleTemplatePath != null)
+        {
+            try
+            {
+                string particleTemplate = File.ReadAllText(particleTemplatePath);
+                // 提取main函数的内容（粒子系统的核心计算代码）
+                particleVSCode = ExtractParticleMainFunction(particleTemplate);
+
+                if (!string.IsNullOrEmpty(particleVSCode))
+                {
+                    Debug.Log("LayaAir3D: Successfully extracted particle VS code from template file");
+                    sb.AppendLine(particleVSCode);
+
+                    // 添加特效相关的varying赋值
+                    AddEffectVaryingAssignments(sb, parseResult);
+                    return;
+                }
+                else
+                {
+                    Debug.LogWarning("LayaAir3D: Failed to extract particle main function from template file");
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"LayaAir3D: Failed to read Particle.shader template: {e.Message}");
+            }
+        }
+        else
+        {
+            Debug.LogWarning("LayaAir3D: Particle.shader template file not found in any expected location");
+            Debug.LogWarning("LayaAir3D: Searched paths:");
+            foreach (var path in possiblePaths)
+            {
+                Debug.LogWarning($"  - {path}");
+            }
+        }
+
+        // Fallback 2: 使用内置的粒子系统代码（简化版但已验证正确）
+        Debug.LogWarning("LayaAir3D: Using built-in particle code as final fallback");
+        GenerateBuiltInParticleVertexCode(sb, parseResult);
+    }
+
+    /// <summary>
+    /// 从Particle.shader提取main函数内容（增强版）
+    /// </summary>
+    private static string ExtractParticleMainFunction(string particleTemplate)
+    {
+        try
+        {
+            // 查找"void main()"到"}"的内容（在ParticleVS中）
+            int vsStart = particleTemplate.IndexOf("#defineGLSL ParticleVS");
+            if (vsStart == -1)
+            {
+                // 尝试其他可能的标记
+                vsStart = particleTemplate.IndexOf("#defineGLSL");
+                if (vsStart == -1)
+                {
+                    Debug.LogWarning("LayaAir3D: Cannot find #defineGLSL in Particle.shader template");
+                    return null;
+                }
+            }
+
+            // 查找void main()
+            int mainStart = particleTemplate.IndexOf("void main()", vsStart);
+            if (mainStart == -1)
+            {
+                Debug.LogWarning("LayaAir3D: Cannot find void main() in Particle.shader template");
+                return null;
+            }
+
+            // 查找main函数的开始花括号
+            int mainBodyStart = particleTemplate.IndexOf("{", mainStart);
+            if (mainBodyStart == -1)
+            {
+                Debug.LogWarning("LayaAir3D: Cannot find opening brace for main() function");
+                return null;
+            }
+
+            // 计数花括号来找到匹配的结束花括号
+            int braceCount = 0;
+            int pos = mainBodyStart;
+            bool inString = false;
+            bool inComment = false;
+            bool inLineComment = false;
+            char prevChar = '\0';
+
+            while (pos < particleTemplate.Length)
+            {
+                char c = particleTemplate[pos];
+
+                // 处理字符串内的字符（忽略引号内的花括号）
+                if (c == '"' && prevChar != '\\')
+                {
+                    inString = !inString;
+                }
+                // 处理注释
+                else if (!inString && c == '/' && pos + 1 < particleTemplate.Length)
+                {
+                    if (particleTemplate[pos + 1] == '/')
+                    {
+                        inLineComment = true;
+                        pos++;
+                    }
+                    else if (particleTemplate[pos + 1] == '*')
+                    {
+                        inComment = true;
+                        pos++;
+                    }
+                }
+                else if (inLineComment && c == '\n')
+                {
+                    inLineComment = false;
+                }
+                else if (inComment && c == '*' && pos + 1 < particleTemplate.Length && particleTemplate[pos + 1] == '/')
+                {
+                    inComment = false;
+                    pos++;
+                }
+                // 只在非字符串、非注释中计数花括号
+                else if (!inString && !inComment && !inLineComment)
+                {
+                    if (c == '{') braceCount++;
+                    if (c == '}')
+                    {
+                        braceCount--;
+                        if (braceCount == 0)
+                        {
+                            // 提取main函数体（不包括最外层的{}）
+                            string mainBody = particleTemplate.Substring(mainBodyStart + 1, pos - mainBodyStart - 1);
+
+                            // 验证提取的代码
+                            if (mainBody.Trim().Length < 10)
+                            {
+                                Debug.LogWarning("LayaAir3D: Extracted main function body is too short, might be invalid");
+                                return null;
+                            }
+
+                            Debug.Log($"LayaAir3D: Successfully extracted {mainBody.Length} characters from particle main function");
+                            return mainBody;
+                        }
+                    }
+                }
+
+                prevChar = c;
+                pos++;
+            }
+
+            Debug.LogWarning("LayaAir3D: Cannot find closing brace for main() function (unbalanced braces)");
+            return null;
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"LayaAir3D: Exception while extracting particle main function: {e.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 添加特效相关的varying赋值（在粒子计算之后）
+    /// </summary>
+    private static void AddEffectVaryingAssignments(StringBuilder sb, ShaderParseResult parseResult)
+    {
+        // 这些赋值应该在粒子计算完成后、gl_Position=remapPositionZ之前执行
+
         sb.AppendLine();
-        sb.AppendLine("    #ifdef COLOR");
-        sb.AppendLine("        v_VertexColor = vertex.vertexColor;");
-        sb.AppendLine("    #endif");
+        sb.AppendLine("        // 特效相关的varying赋值");
+
+        // ⭐ 通用修复：确保v_Texcoord0总是被赋值（很多FS会使用它）
+        // 如果有Scroll属性，后面会覆盖；如果没有，至少有一个默认值
+        if (parseResult.collectedVaryings != null &&
+            parseResult.collectedVaryings.ContainsKey("v_Texcoord0"))
+        {
+            string texcoordType = parseResult.collectedVaryings["v_Texcoord0"];
+            if (texcoordType == "vec4")
+            {
+                sb.AppendLine("        v_Texcoord0.xy = v_TextureCoordinate;");
+                sb.AppendLine("        v_Texcoord0.zw = gl_Position.xy; // 默认屏幕坐标");
+            }
+            else if (texcoordType == "vec2")
+            {
+                sb.AppendLine("        v_Texcoord0 = v_TextureCoordinate;");
+            }
+        }
+
+        // 屏幕坐标（如果需要）
+        if (HasPropertyByName(parseResult, "Distort") || HasPropertyByName(parseResult, "Screen") ||
+            parseResult.collectedVaryings.ContainsKey("v_ScreenPos"))
+        {
+            sb.AppendLine("        v_ScreenPos.xy = (gl_Position.xy + gl_Position.w) * 0.5;");
+            sb.AppendLine("        v_ScreenPos.zw = gl_Position.zw;");
+        }
+
+        // ⭐ 修复：移除v_Texcoord5赋值
+        // 原代码：sb.AppendLine("        v_Texcoord5 = gl_Position;");
+        // 问题：v_Texcoord5没有在varying中声明，且FS中未使用
+        // 屏幕坐标已经通过v_ScreenPos传递，不需要额外的v_Texcoord5
+
+        // UV滚动
+        if (HasPropertyByName(parseResult, "Scroll"))
+        {
+            sb.AppendLine("        v_Texcoord0.xy = v_TextureCoordinate;");
+            sb.AppendLine("        v_Texcoord0.zw = fract(vec2(u_Scroll0X, u_Scroll0Y) * u_Time);");
+
+            if (HasPropertyByName(parseResult, "Scroll1") || HasPropertyByName(parseResult, "DetailTex"))
+            {
+                sb.AppendLine("    #if defined(LAYERTYPE_TWO) || defined(LAYERTYPE_THREE)");
+                sb.AppendLine("        v_Texcoord4.xy = fract(vec2(u_Scroll1X, u_Scroll1Y) * u_Time);");
+                sb.AppendLine("    #endif");
+            }
+
+            if (HasPropertyByName(parseResult, "Scroll2") || HasPropertyByName(parseResult, "DetailTex2"))
+            {
+                sb.AppendLine("    #ifdef LAYERTYPE_THREE");
+                sb.AppendLine("        v_Texcoord4.zw = fract(vec2(u_Scroll2X, u_Scroll2Y) * u_Time);");
+                sb.AppendLine("    #endif");
+            }
+
+            if (HasPropertyByName(parseResult, "Distort0"))
+            {
+                sb.AppendLine("    #ifdef USEDISTORT0");
+                sb.AppendLine("        v_Texcoord6.xy = fract(vec2(u_Distort0X, u_Distort0Y) * u_Time);");
+                sb.AppendLine("    #endif");
+            }
+
+            if (HasPropertyByName(parseResult, "DissolveDistort"))
+            {
+                sb.AppendLine("    #ifdef USEDISSOLVEDISTORT");
+                sb.AppendLine("        v_Texcoord6.zw = fract(vec2(u_DissolveDistortX, u_DissolveDistortY) * u_Time);");
+                sb.AppendLine("    #endif");
+            }
+        }
+
+        // 旋转预计算
+        if (HasPropertyByName(parseResult, "RotateAngle"))
+        {
+            sb.AppendLine("    #ifdef ROTATIONTEX");
+            sb.AppendLine("        float rad1 = u_RotateAngle * 0.01745329;");
+            sb.AppendLine("        v_Texcoord9.x = cos(rad1);");
+            sb.AppendLine("        v_Texcoord9.y = sin(rad1);");
+            sb.AppendLine("    #endif");
+
+            if (HasPropertyByName(parseResult, "RotateAngle02"))
+            {
+                sb.AppendLine("    #ifdef ROTATIONTEXTWO");
+                sb.AppendLine("        float rad2 = u_RotateAngle02 * 0.01745329;");
+                sb.AppendLine("        v_Texcoord9.z = cos(rad2);");
+                sb.AppendLine("        v_Texcoord9.w = sin(rad2);");
+                sb.AppendLine("    #endif");
+            }
+        }
+    }
+
+    /// <summary>
+    /// 生成内置的粒子系统顶点代码（作为后备方案）
+    /// </summary>
+    private static void GenerateBuiltInParticleVertexCode(StringBuilder sb, ShaderParseResult parseResult)
+    {
+        // 这是一个简化的粒子系统实现，当Particle.shader模板不可用时使用
+        sb.AppendLine("        // 简化的粒子系统实现（后备方案）");
+        sb.AppendLine("        float age = u_Time - a_DirectionTime.w;");
+        sb.AppendLine("        float normalizedAge = age / a_ShapePositionStartLifeTime.w;");
         sb.AppendLine();
-        sb.AppendLine("        gl_Position = getPositionCS(v_PositionWS);");
-        sb.AppendLine("        v_PositionCS = gl_Position;");
-        sb.AppendLine("        v_ScreenPos = gl_Position * 0.5 + vec4(0.5 * gl_Position.w);");
+        sb.AppendLine("        if (normalizedAge < 1.0) {");
+        sb.AppendLine("            vec3 startVelocity = a_DirectionTime.xyz * a_StartSpeed;");
+        sb.AppendLine("            vec3 gravityVelocity = u_Gravity * age;");
+        sb.AppendLine();
+        sb.AppendLine("            vec4 worldRotation;");
+        sb.AppendLine("            if (u_SimulationSpace == 0)");
+        sb.AppendLine("                worldRotation = a_SimulationWorldRotation;");
+        sb.AppendLine("            else");
+        sb.AppendLine("                worldRotation = u_WorldRotation;");
+        sb.AppendLine();
+        sb.AppendLine("            // 简化的位置计算");
+        sb.AppendLine("            vec3 center = a_ShapePositionStartLifeTime.xyz + startVelocity * age;");
+        sb.AppendLine("            center += 0.5 * gravityVelocity * age;");
+        sb.AppendLine();
+        sb.AppendLine("            if (u_SimulationSpace == 0)");
+        sb.AppendLine("                center = center + a_SimulationWorldPostion;");
+        sb.AppendLine("            else if (u_SimulationSpace == 1)");
+        sb.AppendLine("                center = center + u_WorldPosition;");
+        sb.AppendLine();
+        sb.AppendLine("            // Billboard");
+        sb.AppendLine("            vec2 corner = a_CornerTextureCoordinate.xy;");
+        sb.AppendLine("            vec3 cameraUpVector = normalize(u_CameraUp);");
+        sb.AppendLine("            vec3 sideVector = normalize(cross(u_CameraDirection, cameraUpVector));");
+        sb.AppendLine("            vec3 upVector = normalize(cross(sideVector, u_CameraDirection));");
+        sb.AppendLine();
+        sb.AppendLine("            vec2 size = a_StartSize.xy;");
+        sb.AppendLine("            corner *= size;");
+        sb.AppendLine("            center += u_SizeScale.xzy * (corner.x * sideVector + corner.y * upVector);");
+        sb.AppendLine();
+        sb.AppendLine("            gl_Position = u_Projection * u_View * vec4(center, 1.0);");
+        sb.AppendLine();
+        sb.AppendLine("            // 颜色");
+        sb.AppendLine("            vec4 startcolor = gammaToLinear(a_StartColor);");
+        sb.AppendLine("            v_Color = startcolor;");
+        sb.AppendLine();
+        sb.AppendLine("            // UV");
+        sb.AppendLine("            vec2 simulateUV = a_SimulationUV.xy + a_CornerTextureCoordinate.zw * a_SimulationUV.zw;");
+        sb.AppendLine("            v_TextureCoordinate = simulateUV;");
+        sb.AppendLine("        } else {");
+        sb.AppendLine("            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);");
+        sb.AppendLine("        }");
+
+        // 添加特效varying赋值
+        AddEffectVaryingAssignments(sb, parseResult);
+    }
+
+    /// <summary>
+    /// 检查是否有指定名称的属性
+    /// </summary>
+    private static bool HasPropertyByName(ShaderParseResult parseResult, string namePattern)
+    {
+        foreach (var prop in parseResult.properties)
+        {
+            if (prop.unityName.Contains(namePattern) || prop.layaName.Contains(namePattern))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -1674,6 +3187,135 @@ internal class CustomShaderExporter
     }
 
     /// <summary>
+    /// 初始化映射引擎（混合架构）
+    /// </summary>
+    private static void InitializeMappingEngine()
+    {
+        if (mappingEngineInitialized)
+            return;
+
+        mappingEngineInitialized = true;
+
+        // 检查用户自定义映射表
+        string projectMappingPath = Path.Combine(Directory.GetCurrentDirectory(), "ProjectSettings/LayaShaderMappings.json");
+        bool hasUserMappings = File.Exists(projectMappingPath);
+
+        if (hasUserMappings)
+        {
+            Debug.Log("==================== Shader Mapping Engine ====================");
+            Debug.Log("LayaAir3D: Custom shader mappings detected");
+            Debug.Log("LayaAir3D: Initializing mapping table mode...");
+
+            // 初始化映射引擎
+            mappingEngine = new ShaderMappingEngine();
+
+            // 加载内置映射表
+            string builtinMappingPath = Path.Combine(Application.dataPath, "LayaAir3.0UnityPlugin/Editor/Mappings/builtin_unity_to_laya.json");
+            if (File.Exists(builtinMappingPath))
+            {
+                if (mappingEngine.LoadMappings(builtinMappingPath))
+                {
+                    Debug.Log("LayaAir3D: ✓ Loaded builtin mappings");
+                }
+            }
+            else
+            {
+                Debug.LogWarning($"LayaAir3D: Builtin mapping file not found: {builtinMappingPath}");
+            }
+
+            // 加载用户映射表（可覆盖内置规则）
+            if (mappingEngine.LoadMappings(projectMappingPath))
+            {
+                Debug.Log($"LayaAir3D: ✓ Loaded custom mappings from: {projectMappingPath}");
+                useMappingTableMode = true;
+            }
+
+            if (useMappingTableMode)
+            {
+                Debug.Log("LayaAir3D: Mapping table mode ENABLED");
+                Debug.Log("LayaAir3D: Priority: Custom rules → Builtin rules → Built-in code fallback");
+            }
+            else
+            {
+                Debug.LogWarning("LayaAir3D: Failed to load mappings, falling back to built-in mode");
+            }
+
+            Debug.Log("===============================================================");
+        }
+        else
+        {
+            Debug.Log("LayaAir3D: No custom mappings found, using built-in conversion mode");
+            Debug.Log($"LayaAir3D: To enable mapping table mode, create: {projectMappingPath}");
+            useMappingTableMode = false;
+        }
+    }
+
+    /// <summary>
+    /// 检查是否需要回退到内置规则
+    /// </summary>
+    private static bool CheckNeedsFallback(string code)
+    {
+        // 检查常见的Unity特有标识符
+        string[] unityIdentifiers = new string[]
+        {
+            "UnityObjectToClipPos",
+            "UnityObjectToWorldNormal",
+            "UnityWorldToObjectDir",
+            "UNITY_MATRIX_MVP",
+            "UNITY_MATRIX_MV",
+            "UNITY_MATRIX_V",
+            "UNITY_MATRIX_P",
+            "UNITY_MATRIX_IT_MV",
+            "TRANSFER_SHADOW",
+            "SHADOW_COORDS",
+            "SHADOW_ATTENUATION"
+        };
+
+        foreach (var identifier in unityIdentifiers)
+        {
+            if (code.Contains(identifier))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 应用内置转换规则作为回退
+    /// </summary>
+    private static string ApplyBuiltInConversionAsFallback(string code)
+    {
+        // Unity矩阵转换
+        code = Regex.Replace(code, @"\bUNITY_MATRIX_MVP\b", "(u_Projection * u_View * u_World)");
+        code = Regex.Replace(code, @"\bUNITY_MATRIX_MV\b", "(u_View * u_World)");
+        code = Regex.Replace(code, @"\bUNITY_MATRIX_V\b", "u_View");
+        code = Regex.Replace(code, @"\bUNITY_MATRIX_P\b", "u_Projection");
+        code = Regex.Replace(code, @"\bUNITY_MATRIX_IT_MV\b", "transpose(inverse(u_View * u_World))");
+
+        // UnityObjectToClipPos - 直接展开为矩阵乘法，避免函数调用的类型不匹配问题
+        code = Regex.Replace(code, @"UnityObjectToClipPos\s*\(\s*([^)]+)\s*\)",
+            m => {
+                string arg = m.Groups[1].Value.Trim();
+                // 如果参数已经是vec4，直接使用；否则转换为vec4
+                if (arg.StartsWith("vec4(") || arg.Contains(".xyzw"))
+                    return $"(u_ViewProjection * u_WorldMat * {arg})";
+                else
+                    return $"(u_ViewProjection * u_WorldMat * vec4({arg}, 1.0))";
+            });
+
+        // UnityObjectToWorldNormal
+        code = Regex.Replace(code, @"UnityObjectToWorldNormal\s*\(\s*([^)]+)\s*\)",
+            m => $"normalize((transpose(inverse(getWorldMatrix())) * vec4({m.Groups[1].Value}, 0.0)).xyz)");
+
+        // Unity阴影相关（简化处理）
+        code = Regex.Replace(code, @"TRANSFER_SHADOW\s*\([^)]*\)\s*;?", "");
+        code = Regex.Replace(code, @"SHADOW_COORDS\s*\([^)]*\)", "");
+        code = Regex.Replace(code, @"SHADOW_ATTENUATION\s*\([^)]*\)", "1.0");
+
+        return code;
+    }
+
+    /// <summary>
     /// 转换HLSL函数到GLSL
     /// </summary>
     private static string ConvertHLSLFunction(string hlslFunc)
@@ -1704,6 +3346,11 @@ internal class CustomShaderExporter
         
         // 替换输入变量 v.xxx（根据appdata结构体名称）
         string inputVar = "v";
+        // 先处理特殊情况：v.vertex.xyz 直接转换为 vertex.positionOS（避免多余的vec4包装）
+        code = Regex.Replace(code, $@"\b{inputVar}\.vertex\.xyz\b", "vertex.positionOS");
+        code = Regex.Replace(code, $@"\b{inputVar}\.vertex\.xy\b", "vertex.positionOS.xy");
+        code = Regex.Replace(code, $@"\b{inputVar}\.vertex\.xz\b", "vertex.positionOS.xz");
+        // 然后处理普通情况：v.vertex 转换为 vec4(vertex.positionOS, 1.0)
         code = Regex.Replace(code, $@"\b{inputVar}\.vertex\b", "vec4(vertex.positionOS, 1.0)");
         code = Regex.Replace(code, $@"\b{inputVar}\.normal\b", "vertex.normalOS");
         code = Regex.Replace(code, $@"\b{inputVar}\.tangent\b", "vertex.tangentOS");
@@ -1797,21 +3444,54 @@ internal class CustomShaderExporter
             code = Regex.Replace(code, @"\bgetWorldMatrix\s*\(\s*\)", "mat4(1.0)");
             
             // getPositionCS -> 粒子系统使用 u_Projection * u_View
-            code = Regex.Replace(code, @"\bgetPositionCS\s*\(\s*([^)]+)\s*\)", "(u_Projection * u_View * vec4($1, 1.0))");
+            code = Regex.Replace(code, @"\bgetPositionCS\s*\(\s*([^)]+)\s*\)", m => {
+                string arg = m.Groups[1].Value.Trim();
+                // 检查参数是否已经是vec4
+                if (arg.StartsWith("vec4(") || arg.Contains(".xyzw") || arg == "v_PositionWS_vec4")
+                    return $"(u_Projection * u_View * {arg})";
+                else
+                    return $"(u_Projection * u_View * vec4({arg}, 1.0))";
+            });
             
             // initPixelParams, getVertexParams 等函数在粒子中不存在
             code = Regex.Replace(code, @"\bgetVertexParams\s*\(\s*\w+\s*\)\s*;?", "// getVertexParams not available in particle shader");
             code = Regex.Replace(code, @"\binitPixelParams\s*\(\s*\w+\s*,\s*\w+\s*\)\s*;?", "// initPixelParams not available in particle shader");
             
             // ========== Unity粒子变量到LayaAir粒子变量映射 ==========
-            
-            // _Time -> u_CurrentTime (粒子系统使用u_CurrentTime)
-            code = Regex.Replace(code, @"\bu_Time\b", "u_CurrentTime"); // 通用转换后的u_Time也要改
-            code = Regex.Replace(code, @"\b_Time\.y\b", "u_CurrentTime");
-            code = Regex.Replace(code, @"\b_Time\.x\b", "(u_CurrentTime * 0.05)");
-            code = Regex.Replace(code, @"\b_Time\.z\b", "(u_CurrentTime * 2.0)");
-            code = Regex.Replace(code, @"\b_Time\.w\b", "(u_CurrentTime * 3.0)");
-            
+
+            // ⭐ 修复：_Time -> u_Time (LayaAir引擎内置时间变量，粒子系统也使用u_Time)
+            // Unity _Time: float4 (t/20, t, t*2, t*3)
+            // LayaAir u_Time: float (场景运行时间)
+
+            // ⭐ 修复1：先处理vec4赋值的情况（类型转换）
+            code = Regex.Replace(code,
+                @"(float4|vec4)\s+(\w+)\s*=\s*_Time\s*\+\s*_TimeEditor\b",
+                "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+            code = Regex.Replace(code,
+                @"(float4|vec4)\s+(\w+)\s*=\s*_TimeEditor\s*\+\s*_Time\b",
+                "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+            code = Regex.Replace(code,
+                @"(float4|vec4)\s+(\w+)\s*=\s*_Time\b",
+                "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+
+            // ⭐ 修复2：处理分量访问
+            code = Regex.Replace(code, @"\b_Time\.y\b", "u_Time");
+            code = Regex.Replace(code, @"\b_Time\.x\b", "(u_Time * 0.05)");
+            code = Regex.Replace(code, @"\b_Time\.z\b", "(u_Time * 2.0)");
+            code = Regex.Replace(code, @"\b_Time\.w\b", "(u_Time * 3.0)");
+            code = Regex.Replace(code, @"\b_Time\.g\b", "u_Time");
+            code = Regex.Replace(code, @"\b_Time\.r\b", "(u_Time * 0.05)");
+            code = Regex.Replace(code, @"\b_Time\.b\b", "(u_Time * 2.0)");
+            code = Regex.Replace(code, @"\b_Time\.a\b", "(u_Time * 3.0)");
+
+            // ⭐ 修复3：其他情况的_Time转换为u_Time
+            code = Regex.Replace(code, @"\b_Time\b", "u_Time");
+
+            // ⭐ 修复4：_TimeEditor是Unity编辑器专用变量，运行时不存在
+            code = Regex.Replace(code, @"\bu_Time\s*\+\s*_TimeEditor\b", "u_Time /* editor-only var removed */");
+            code = Regex.Replace(code, @"\b_TimeEditor\s*\+\s*u_Time\b", "u_Time /* editor-only var removed */");
+            code = Regex.Replace(code, @"\b_TimeEditor\b", "0.0 /* editor-only */");
+
             // Unity矩阵 -> 粒子系统矩阵（粒子已经在世界空间）
             code = Regex.Replace(code, @"\bUNITY_MATRIX_MVP\b", "(u_Projection * u_View)");
             code = Regex.Replace(code, @"\bUNITY_MATRIX_VP\b", "(u_Projection * u_View)");
@@ -1904,7 +3584,14 @@ internal class CustomShaderExporter
         // UnityObjectToClipPos
         code = ConvertFunctionWithBalancedParens(code, "UnityObjectToClipPos", (args) =>
         {
-            return $"(u_ViewProjection * u_WorldMat * {args})";
+            string arg = args.Trim();
+            // 确保参数是vec4类型
+            if (arg.StartsWith("vec4(") || arg.Contains(".xyzw"))
+                return $"(u_ViewProjection * u_WorldMat * {arg})";
+            else if (arg.EndsWith(".xyz") || arg.EndsWith(".rgb"))
+                return $"(u_ViewProjection * u_WorldMat * vec4({arg}, 1.0))";
+            else
+                return $"(u_ViewProjection * u_WorldMat * vec4({arg}, 1.0))";
         });
         
         // UnityObjectToWorldNormal
@@ -1958,16 +3645,20 @@ internal class CustomShaderExporter
             {
                 string uv = parts[0].Trim();
                 string texName = parts[1].Trim();
-                
-                // 移除可能的前缀
+
+                // ⭐ 修复：移除可能的前缀（_或u_）
+                // Unity: TRANSFORM_TEX(uv, _distort_tex)
+                // 在ConvertHLSLToGLSL之后可能已被转换为: TRANSFORM_TEX(uv, u_distort_tex)
                 if (texName.StartsWith("_"))
                     texName = texName.Substring(1);
-                
+                else if (texName.StartsWith("u_"))
+                    texName = texName.Substring(2);
+
                 // 特殊纹理名映射（参考Unity2Laya_ShaderMapping.md：主纹理用u_TilingOffset）
                 string stName;
-                if (texName == "MainTex" || texName == "BaseMap")
+                if (texName == "MainTex" || texName == "BaseMap" || texName == "AlbedoTexture")
                     stName = "u_TilingOffset";  // 粒子/Effect主纹理统一用u_TilingOffset
-                else if (texName == "BumpMap" || texName == "NormalMap" || texName == "u_NormalMap")
+                else if (texName == "BumpMap" || texName == "NormalMap" || texName == "NormalTexture")
                     stName = "u_NormalTexture_ST";
                 else if (texName == "FadeEdgeTexture")
                     stName = "u_FadeEdgeTexture_ST";
@@ -1977,8 +3668,18 @@ internal class CustomShaderExporter
                     stName = "u_GradientMapTex0_ST";
                 else
                     stName = $"u_{texName}_ST";
-                
-                return $"({uv} * {stName}.xy + {stName}.zw)";
+
+                // 如果uv包含运算符，需要用括号包围以保证正确的运算优先级
+                // 例如: TRANSFORM_TEX(a + b, tex) -> ((a + b) * tex_ST.xy + tex_ST.zw)
+                string uvExpr = uv;
+                if (uv.Contains("+") || uv.Contains("-") || uv.Contains("*") || uv.Contains("/"))
+                {
+                    // 检查是否已经被括号包围
+                    if (!uv.TrimStart().StartsWith("(") || !uv.TrimEnd().EndsWith(")"))
+                        uvExpr = $"({uv})";
+                }
+
+                return $"({uvExpr} * {stName}.xy + {stName}.zw)";
             }
             return args;
         });
@@ -2052,13 +3753,45 @@ internal class CustomShaderExporter
             code = Regex.Replace(code, @"PixelParams\s+pixel\s*;\s*\n?", "");
             code = Regex.Replace(code, @"\binitPixelParams\s*\([^)]*\)\s*;?", "");
             
-            // 粒子shader中的时间变量
-            code = Regex.Replace(code, @"\bu_Time\b", "u_CurrentTime");
-            code = Regex.Replace(code, @"\b_Time\.y\b", "u_CurrentTime");
-            code = Regex.Replace(code, @"\b_Time\.x\b", "(u_CurrentTime * 0.05)");
-            code = Regex.Replace(code, @"\b_Time\.z\b", "(u_CurrentTime * 2.0)");
-            code = Regex.Replace(code, @"\b_Time\.w\b", "(u_CurrentTime * 3.0)");
-            
+            // ⭐ 修复：粒子shader中的时间变量统一使用u_Time（引擎内置变量）
+            // Unity _Time: float4 (t/20, t, t*2, t*3)
+            // LayaAir u_Time: float (场景运行时间)
+
+            // ⭐ 修复1：先处理vec4赋值的情况（类型转换）
+            code = Regex.Replace(code,
+                @"(float4|vec4)\s+(\w+)\s*=\s*_Time\s*\+\s*u_TimeEditor\b",
+                "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+            code = Regex.Replace(code,
+                @"(float4|vec4)\s+(\w+)\s*=\s*u_TimeEditor\s*\+\s*_Time\b",
+                "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+            code = Regex.Replace(code,
+                @"(float4|vec4)\s+(\w+)\s*=\s*_Time\b",
+                "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+            code = Regex.Replace(code,
+                @"(float4|vec4)\s+(\w+)\s*=\s*u_Time\s*\+\s*u_TimeEditor\b",
+                "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+            code = Regex.Replace(code,
+                @"(float4|vec4)\s+(\w+)\s*=\s*u_TimeEditor\s*\+\s*u_Time\b",
+                "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+
+            // ⭐ 修复2：处理分量访问
+            code = Regex.Replace(code, @"\b_Time\.y\b", "u_Time");
+            code = Regex.Replace(code, @"\b_Time\.x\b", "(u_Time * 0.05)");
+            code = Regex.Replace(code, @"\b_Time\.z\b", "(u_Time * 2.0)");
+            code = Regex.Replace(code, @"\b_Time\.w\b", "(u_Time * 3.0)");
+            code = Regex.Replace(code, @"\b_Time\.g\b", "u_Time");
+            code = Regex.Replace(code, @"\b_Time\.r\b", "(u_Time * 0.05)");
+            code = Regex.Replace(code, @"\b_Time\.b\b", "(u_Time * 2.0)");
+            code = Regex.Replace(code, @"\b_Time\.a\b", "(u_Time * 3.0)");
+
+            // ⭐ 修复3：其他情况的_Time转换为u_Time
+            code = Regex.Replace(code, @"\b_Time\b", "u_Time");
+
+            // ⭐ 修复4：_TimeEditor是Unity编辑器专用变量，运行时不存在（FS）
+            code = Regex.Replace(code, @"\bu_Time\s*\+\s*u_TimeEditor\b", "u_Time /* editor-only var removed */");
+            code = Regex.Replace(code, @"\bu_TimeEditor\s*\+\s*u_Time\b", "u_Time /* editor-only var removed */");
+            code = Regex.Replace(code, @"\bu_TimeEditor\b", "0.0 /* editor-only */");
+
             // 相机位置
             code = Regex.Replace(code, @"\b_WorldSpaceCameraPos\b", "u_CameraPos");
             
@@ -2071,6 +3804,10 @@ internal class CustomShaderExporter
             
             // Varying映射：粒子颜色用v_Color（参考：i.vcolor->v_Color）
             code = Regex.Replace(code, @"\bv_VertexColor\b", "v_Color");
+
+            // ⭐ 修复：Uniform颜色映射（与uniformMap中的定义保持一致）
+            // 粒子shader uniformMap中定义的是u_AlbedoColor，但代码中可能使用u_Color
+            code = Regex.Replace(code, @"\bu_Color\b", "u_AlbedoColor");
             code = Regex.Replace(code, @"\bv_Texcoord1\b", "v_Color");  // 当v_Texcoord1用于顶点颜色时
             
             // 修复语法错误：mat3(transpose); (inverse(u_View)) 等
@@ -2087,17 +3824,101 @@ internal class CustomShaderExporter
         // 移除facing参数相关
         code = Regex.Replace(code, @",?\s*float\s+facing\s*:\s*VFACE", "");
         code = Regex.Replace(code, @"\bfacing\b", "1.0");
-        
+
+        // ⭐ v_Texcoord0的处理已经在ApplySystematicTypeFixes的阶段6中智能处理
+        // 不在这里强制替换，避免错误地把vec4变成vec2
+
+        // 最后一次修复.rgb和.a运算中的vec4变量
+        code = Regex.Replace(code,
+            @"(\.(?:rgb|a)\s*[\*\+\-/]?=\s*)([^;]+);",
+            match => {
+                string prefix = match.Groups[1].Value;
+                string expr = match.Groups[2].Value;
+                bool isRgb = prefix.Contains("rgb");
+
+                // 根据是.rgb还是.a来添加相应的分量访问
+                if (isRgb)
+                {
+                    expr = Regex.Replace(expr, @"\bv_Color(?!\.)", "v_Color.rgb");
+                    expr = Regex.Replace(expr, @"\bu_TintColor(?!\.)", "u_TintColor.rgb");
+                    expr = Regex.Replace(expr, @"\bu_AlbedoColor(?!\.)", "u_AlbedoColor.rgb");
+                    expr = Regex.Replace(expr, @"\bu_BaseColor(?!\.)", "u_BaseColor.rgb");
+                }
+                else
+                {
+                    expr = Regex.Replace(expr, @"\bv_Color(?!\.)", "v_Color.a");
+                    expr = Regex.Replace(expr, @"\bu_TintColor(?!\.)", "u_TintColor.a");
+                    expr = Regex.Replace(expr, @"\bu_AlbedoColor(?!\.)", "u_AlbedoColor.a");
+                    expr = Regex.Replace(expr, @"\bu_BaseColor(?!\.)", "u_BaseColor.a");
+                }
+
+                // 清理重复的分量访问
+                expr = Regex.Replace(expr, @"\.rgb\.rgb", ".rgb");
+                expr = Regex.Replace(expr, @"\.a\.a", ".a");
+
+                return $"{prefix}{expr};";
+            });
+
         return code;
     }
 
     /// <summary>
-    /// HLSL到GLSL的通用代码转换
+    /// HLSL到GLSL的通用代码转换（混合架构）
     /// </summary>
     private static string ConvertHLSLToGLSL(string hlslCode)
     {
+        // 初始化映射引擎
+        InitializeMappingEngine();
+
         string code = hlslCode;
-        
+
+        // ==================== 混合架构：映射表优先模式 ====================
+        if (useMappingTableMode && mappingEngine != null && mappingEngine.HasRules())
+        {
+            conversionTimer.Restart();
+
+            // 优先使用映射表转换
+            code = mappingEngine.ApplyMappings(code, "all");
+
+            mappingTableConversionTime = conversionTimer.ElapsedMilliseconds;
+
+            Debug.Log($"LayaAir3D: Mapping table applied - {mappingEngine.GetStatistics()}");
+
+            // 检查是否还有未转换的Unity特有标识符
+            bool needsFallback = CheckNeedsFallback(code);
+
+            if (needsFallback)
+            {
+                Debug.Log("LayaAir3D: Some Unity-specific code not covered by mapping table, applying built-in fallback...");
+
+                conversionTimer.Restart();
+
+                // 使用内置规则作为回退
+                code = ApplyBuiltInConversionAsFallback(code);
+
+                builtInConversionTime = conversionTimer.ElapsedMilliseconds;
+            }
+
+            return code;
+        }
+
+        // ==================== 内置模式：硬编码规则 ====================
+
+        conversionTimer.Restart();
+
+        // ⭐ 修复错误的swizzle访问 (CRITICAL FIX)
+        // vec2没有.z和.w分量，vec3没有.w分量，这是Unity shader代码转换错误导致的
+        // 例如：u_TilingOffset.xy.z -> u_TilingOffset.z
+        code = Regex.Replace(code, @"(\w+)\.xy\.z\b", "$1.z");
+        code = Regex.Replace(code, @"(\w+)\.xy\.w\b", "$1.w");
+        code = Regex.Replace(code, @"(\w+)\.xyz\.w\b", "$1.w");
+        code = Regex.Replace(code, @"(\w+)\.x\.y\b", "$1.y");
+        code = Regex.Replace(code, @"(\w+)\.x\.z\b", "$1.z");
+        code = Regex.Replace(code, @"(\w+)\.x\.w\b", "$1.w");
+        code = Regex.Replace(code, @"(\w+)\.y\.z\b", "$1.z");
+        code = Regex.Replace(code, @"(\w+)\.y\.w\b", "$1.w");
+        code = Regex.Replace(code, @"(\w+)\.z\.w\b", "$1.w");
+
         // ============================================
         // 类型转换（注意顺序，先转换长的）
         // ============================================
@@ -2158,8 +3979,20 @@ internal class CustomShaderExporter
         // ============================================
         
         // 时间变量 (SceneCommon.glsl)
-        // Unity _Time: (t/20, t, t*2, t*3)
+        // Unity _Time: float4 (t/20, t, t*2, t*3)
         // LayaAir u_Time: float 场景运行时间（秒）
+
+        // ⭐ 修复1：先处理vec4赋值的情况（类型转换）
+        // Unity: vec4 time = _Time + _TimeEditor;
+        // LayaAir: vec4 time = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0);
+        code = Regex.Replace(code,
+            @"(float4|vec4)\s+(\w+)\s*=\s*_Time\s*\+\s*_TimeEditor\b",
+            "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+        code = Regex.Replace(code,
+            @"(float4|vec4)\s+(\w+)\s*=\s*_TimeEditor\s*\+\s*_Time\b",
+            "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+
+        // ⭐ 修复2：处理分量访问（必须在整体替换之前）
         code = Regex.Replace(code, @"_Time\.y", "u_Time");      // t -> u_Time
         code = Regex.Replace(code, @"_Time\.x", "(u_Time * 0.05)"); // t/20
         code = Regex.Replace(code, @"_Time\.z", "(u_Time * 2.0)");  // t*2
@@ -2168,8 +4001,25 @@ internal class CustomShaderExporter
         code = Regex.Replace(code, @"_Time\.r", "(u_Time * 0.05)");
         code = Regex.Replace(code, @"_Time\.b", "(u_Time * 2.0)");
         code = Regex.Replace(code, @"_Time\.a", "(u_Time * 3.0)");
+
+        // ⭐ 修复3：处理剩余的vec4类型赋值（没有_TimeEditor的情况）
+        code = Regex.Replace(code,
+            @"(float4|vec4)\s+(\w+)\s*=\s*_Time\b",
+            "$1 $2 = vec4(u_Time * 0.05, u_Time, u_Time * 2.0, u_Time * 3.0)");
+
+        // ⭐ 修复4：处理其他情况的_Time（不是vec4赋值，也不是分量访问）
+        // 这种情况通常是错误的，但为了兼容性，转换为u_Time
         code = Regex.Replace(code, @"\b_Time\b", "u_Time");
-        
+
+        // ⭐ 修复5：_TimeEditor是Unity编辑器专用变量，运行时不存在
+        // 移除所有包含_TimeEditor的加法表达式（如果还有的话）
+        code = Regex.Replace(code, @"\bu_Time\s*\+\s*_TimeEditor\b", "u_Time /* editor-only var removed */");
+        code = Regex.Replace(code, @"\b_TimeEditor\s*\+\s*u_Time\b", "u_Time /* editor-only var removed */");
+        code = Regex.Replace(code, @"\b_Time\s*\+\s*_TimeEditor\b", "u_Time /* editor-only var removed */");
+        code = Regex.Replace(code, @"\b_TimeEditor\s*\+\s*_Time\b", "u_Time /* editor-only var removed */");
+        // 单独出现的_TimeEditor替换为0.0
+        code = Regex.Replace(code, @"\b_TimeEditor\b", "0.0 /* editor-only */");
+
         // _SinTime, _CosTime
         code = Regex.Replace(code, @"_SinTime\.w", "sin(u_Time)");
         code = Regex.Replace(code, @"_SinTime\.z", "sin(u_Time * 0.5)");
@@ -2227,8 +4077,11 @@ internal class CustomShaderExporter
         // 变量名转换 (_XXX -> u_XXX)
         // 注意：需要避免转换已经是u_开头的，以及特殊前缀
         // ============================================
-        code = Regex.Replace(code, @"(?<![a-zA-Z0-9_])_([A-Z]\w*)\b", "u_$1");
-        
+        // ⭐ 修复：匹配所有以_开头的变量名（包括小写字母开头的）
+        // 原规则：@"(?<![a-zA-Z0-9_])_([A-Z]\w*)\b" 只匹配大写字母开头
+        // 新规则：匹配大写或小写字母开头的变量名
+        code = Regex.Replace(code, @"(?<![a-zA-Z0-9_])_([a-zA-Z]\w*)\b", "u_$1");
+
         // ============================================
         // 特殊纹理名称映射（在通用转换之后）
         // ============================================
@@ -2343,7 +4196,10 @@ internal class CustomShaderExporter
         {
             return $"normalize((u_WorldMat * vec4({args}, 0.0)).xyz)";
         });
-        
+
+        // TRANSFORM_TEX - 纹理坐标转换宏
+        code = ConvertTransformTex(code);
+
         // ============================================
         // 数字后缀处理（移除f/h后缀）
         // 注意：使用负向后顾断言确保数字前面不是字母，避免将 v2f 转换为 v2.0
@@ -2365,12 +4221,737 @@ internal class CustomShaderExporter
         // 只处理比较运算符两边的情况
         code = Regex.Replace(code, @"(\b[a-zA-Z_]\w*\s*)(==|!=)\s*(\d+)(?!\.|\s*\])", "$1$2 $3.0");
         code = Regex.Replace(code, @"(?<!\.)(\d+)\s*(==|!=)(\s*[a-zA-Z_]\w*\b)(?!\s*\[)", "$1.0 $2$3");
-        
+
+        // ============================================
+        // 修复特定模式的类型不匹配错误
+        // HLSL允许隐式类型转换，但GLSL不允许
+        // 针对性地修复常见的类型错误模式
+        // ============================================
+
+        // 修复模式: vec2 var = scalar_expr * scalar_expr;
+        // 例如: vec2 distortOffset = distortCol.r * u_QD;
+        // 转换为: vec2 distortOffset = vec2(distortCol.r * u_QD);
+        code = Regex.Replace(code,
+            @"(vec2\s+\w+\s*=\s*)(?!vec[234]\()([^;]+?)(\s*\*\s*[^;]+?)(;)",
+            match => {
+                string prefix = match.Groups[1].Value;
+                string expr = match.Groups[2].Value + match.Groups[3].Value;
+                string semicolon = match.Groups[4].Value;
+
+                // 检查表达式是否包含成员访问符（点号）或者已经有vec构造函数
+                // 如果表达式看起来像是标量运算（包含.r .g .b .a或.x .y .z .w等swizzle）
+                if ((expr.Contains(".r") || expr.Contains(".g") || expr.Contains(".b") || expr.Contains(".a") ||
+                     expr.Contains(".x") || expr.Contains(".y") || expr.Contains(".z") || expr.Contains(".w")) &&
+                    !expr.TrimStart().StartsWith("vec") &&
+                    !expr.Contains("vertex.texCoord") && // 不处理已经是vec2的成员
+                    !expr.Contains("v_Texcoord"))        // 不处理varying
+                {
+                    return $"{prefix}vec2({expr.Trim()}){semicolon}";
+                }
+                return match.Value;
+            });
+
+        // 修复模式: vec3 var = scalar; 或 vec3 var = vec2_expr;
+        // 但要非常小心，不要误处理正确的代码
+
+        // 修复模式: vec4 var = vec3_expr;
+        // 例如: vec4 c = u_TintColor * v_VertexColor * m * n * 2.0;
+        // 这种通常是正确的（vec4 * vec4 = vec4），不需要修复
+        // 只修复明显错误的情况，如 vec4 var = vertex.positionOS (vec3);
+        code = Regex.Replace(code,
+            @"(vec4\s+\w+\s*=\s*)(?!vec[234]\()(\w+\.positionOS)(;)",
+            "$1vec4($2, 1.0)$3");
+
         // ============================================
         // 清理多余空行
         // ============================================
         code = Regex.Replace(code, @"\n\s*\n\s*\n", "\n\n");
-        
+
+        // ============================================
+        // ⭐ 修复粒子shader特有的类型问题
+        // ============================================
+
+        // 修复1: texture2D中v_Texcoord0需要.xy（当它是vec4时）
+        // 匹配所有 texture2D(xxx, v_Texcoord0xxx) 但 v_Texcoord0 后面不是 .xy/.zw
+        code = Regex.Replace(code,
+            @"texture2D\s*\(\s*(\w+)\s*,\s*v_Texcoord0(?!\.)",
+            "texture2D($1, v_Texcoord0.xy");
+
+        // 修复2: 向量vec4类型uniform在vec2运算时需要.xy
+        // 匹配: u_UVScroll/u_TilingOffset等在运算或函数参数中，但后面不是.xy/.zw/.xyz/.xyzw
+        code = Regex.Replace(code,
+            @"\b(u_UVScroll|u_TilingOffset|u_Scroll)(?!\.)([\s\)\+\-\*,])",
+            match =>
+            {
+                string varName = match.Groups[1].Value;
+                string suffix = match.Groups[2].Value;
+                return $"{varName}.xy{suffix}";
+            });
+
+        // 修复3: 整数字面量乘法转换为浮点数
+        // 匹配: col.rgb *= 2 * v_Color 或 *= 2 * v_Color 等模式
+        // 非常重要：必须在处理向量操作之前先把整数转为浮点数
+        code = Regex.Replace(code,
+            @"(\*=)\s*([0-9]+)(?!\.)\s*\*",
+            "$1 $2.0 *");
+
+        // 修复: = 2* v_Color (等号后紧跟整数乘v_Color)
+        code = Regex.Replace(code,
+            @"(=\s*)([0-9]+)(?!\.)\s*\*\s*(v_Color|u_TintColor|v_VertexColor)\b",
+            "$1$2.0 * $3");
+
+        // 修复: 一般情况的 整数 * v_Color
+        code = Regex.Replace(code,
+            @"([^\d\.])\s*([0-9]+)(?!\.)\s*\*\s*(v_Color|u_TintColor|v_VertexColor)(?!\.)",
+            match =>
+            {
+                string prefix = match.Groups[1].Value;
+                string num = match.Groups[2].Value;
+                string varName = match.Groups[3].Value;
+                return $"{prefix} {num}.0 * {varName}";
+            });
+
+        // 修复4: 整数乘以向量需要加.0（更通用的情况）
+        // 匹配: 2 * vec_var 或 vec_var * 2
+        code = Regex.Replace(code,
+            @"([^\d\.])([0-9]+)\s*\*\s*(v_\w+|u_\w+)\b",
+            match =>
+            {
+                string prefix = match.Groups[1].Value;
+                string num = match.Groups[2].Value;
+                string varName = match.Groups[3].Value;
+                // 只转换颜色、顶点相关的向量
+                if (varName.Contains("Color") || varName.Contains("Vertex") || varName.Contains("Tint"))
+                {
+                    return $"{prefix}{num}.0 * {varName}";
+                }
+                return match.Value;
+            });
+
+        // 修复5: 确保向量分量访问（v_Color需要.rgb）
+        // 匹配: 数字 * v_Color * xxx.rgb，v_Color应该是v_Color.rgb
+        code = Regex.Replace(code,
+            @"(\d+\.0|\d+)\s*\*\s*(v_Color|v_VertexColor)(?!\.)\s*\*\s*(\w+)\.rgb",
+            "$1 * $2.rgb * $3.rgb");
+
+        // 修复6: v_Color在任何与.rgb操作的表达式中都需要加.rgb
+        // 处理 *= ... * v_Color * ...的情况
+        code = Regex.Replace(code,
+            @"\.rgb\s*\*=([^;]*)\b(v_Color|v_VertexColor)(?!\.)\b([^;]*?)(u_\w+)\.rgb",
+            match =>
+            {
+                string expr1 = match.Groups[1].Value;
+                string vColor = match.Groups[2].Value;
+                string expr2 = match.Groups[3].Value;
+                string uniform = match.Groups[4].Value;
+                return $".rgb *={expr1}{vColor}.rgb{expr2}{uniform}.rgb";
+            });
+
+        // 修复7: 特殊处理 *= 数字 * v_Color * xxx.rgb 的完整模式
+        code = Regex.Replace(code,
+            @"\*=\s*(\d+\.0)\s*\*\s*(v_Color|v_VertexColor)(?!\.)\s*\*\s*(\w+)\.rgb",
+            "*= $1 * $2.rgb * $3.rgb");
+
+        // ============================================
+        // ⭐ 系统性类型修复：处理所有向量维度不匹配问题
+        // ============================================
+        code = ApplySystematicTypeFixes(code);
+
+        // 记录内置模式的转换时间
+        if (!useMappingTableMode)
+        {
+            builtInConversionTime = conversionTimer.ElapsedMilliseconds;
+        }
+
+        return code;
+    }
+
+    /// <summary>
+    /// 根据GLSL类型返回默认值
+    /// </summary>
+    private static string GetDefaultValueForType(string glslType)
+    {
+        switch (glslType)
+        {
+            case "float": return "0.0";
+            case "vec2": return "vec2(0.0, 0.0)";
+            case "vec3": return "vec3(0.0, 0.0, 0.0)";
+            case "vec4": return "vec4(0.0, 0.0, 0.0, 0.0)";
+            case "int": return "0";
+            case "mat2": return "mat2(1.0)";
+            case "mat3": return "mat3(1.0)";
+            case "mat4": return "mat4(1.0)";
+            default: return "0.0";
+        }
+    }
+
+    /// <summary>
+    /// 系统性类型修复：自动检测并修复所有向量维度不匹配问题
+    /// </summary>
+    private static string ApplySystematicTypeFixes(string code)
+    {
+
+        // ============================================
+        // 阶段0: 移除/替换Unity平台特定代码
+        // ============================================
+
+        // 移除Unity条件编译块 - 智能保留else分支内容
+        // 处理 #if UNITY_XXX ... #else ... #endif - 保留else分支
+        code = Regex.Replace(code,
+            @"#\s*if\s+UNITY_[^\n]+\s*\n(.*?)#\s*else\s*\n(.*?)#\s*endif",
+            match => match.Groups[2].Value,  // 保留else分支的内容
+            RegexOptions.Singleline);
+
+        // 处理 #ifdef UNITY_XXX ... #else ... #endif - 保留else分支
+        code = Regex.Replace(code,
+            @"#\s*ifdef\s+UNITY_[^\n]+\s*\n(.*?)#\s*else\s*\n(.*?)#\s*endif",
+            match => match.Groups[2].Value,  // 保留else分支的内容
+            RegexOptions.Singleline);
+
+        // 处理 #ifndef UNITY_XXX ... #else ... #endif - 保留if分支（因为UNITY_XXX不存在）
+        code = Regex.Replace(code,
+            @"#\s*ifndef\s+UNITY_[^\n]+\s*\n(.*?)#\s*else\s*\n(.*?)#\s*endif",
+            match => match.Groups[1].Value,  // 保留if分支的内容
+            RegexOptions.Singleline);
+
+        // 处理没有else的单分支条件编译 - 完全移除
+        // #if UNITY_XXX ... #endif (without else)
+        code = Regex.Replace(code,
+            @"#\s*if\s+UNITY_[^\n]+\s*\n.*?#\s*endif",
+            "",
+            RegexOptions.Singleline);
+
+        // #ifdef UNITY_XXX ... #endif (without else)
+        code = Regex.Replace(code,
+            @"#\s*ifdef\s+UNITY_[^\n]+\s*\n.*?#\s*endif",
+            "",
+            RegexOptions.Singleline);
+
+        // #ifndef UNITY_XXX ... #endif (without else) - 保留内容（因为UNITY_XXX不存在，条件为真）
+        code = Regex.Replace(code,
+            @"#\s*ifndef\s+UNITY_[^\n]+\s*\n(.*?)#\s*endif",
+            match => match.Groups[1].Value,  // 保留内容
+            RegexOptions.Singleline);
+
+        // 移除带defined的复杂条件编译
+        // #if defined(UNITY_XXX) ... #else ... #endif - 保留else分支
+        code = Regex.Replace(code,
+            @"#\s*if\s+defined\s*\(\s*UNITY_[^\)]+\).*?\n(.*?)#\s*else\s*\n(.*?)#\s*endif",
+            match => match.Groups[2].Value,
+            RegexOptions.Singleline);
+
+        // #if !defined(UNITY_XXX) ... #else ... #endif - 保留if分支
+        code = Regex.Replace(code,
+            @"#\s*if\s+!defined\s*\(\s*UNITY_[^\)]+\).*?\n(.*?)#\s*else\s*\n(.*?)#\s*endif",
+            match => match.Groups[1].Value,
+            RegexOptions.Singleline);
+
+        // 单分支defined
+        code = Regex.Replace(code,
+            @"#\s*if\s+defined\s*\(\s*UNITY_[^\)]+\).*?\n.*?#\s*endif",
+            "",
+            RegexOptions.Singleline);
+
+        code = Regex.Replace(code,
+            @"#\s*if\s+!defined\s*\(\s*UNITY_[^\)]+\).*?\n(.*?)#\s*endif",
+            match => match.Groups[1].Value,
+            RegexOptions.Singleline);
+
+        // 移除Unity宏调用（UNITY_开头的函数调用）
+        // UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
+        code = Regex.Replace(code,
+            @"UNITY_[A-Z_0-9]+\s*\([^)]*\)\s*;?\s*\n?",
+            "");
+
+        // 替换Unity屏幕纹理采样宏 - 保留为texture2D调用
+        // UNITY_SAMPLE_SCREENSPACE_TEXTURE(tex, uv) -> texture2D(tex, uv)
+        code = Regex.Replace(code,
+            @"UNITY_SAMPLE_SCREENSPACE_TEXTURE\s*\(\s*([^,]+)\s*,\s*([^)]+)\)",
+            "texture2D($1, $2)");
+
+        // 替换Unity纹理采样宏（其他变体）
+        code = Regex.Replace(code,
+            @"UNITY_SAMPLE_TEX2D\s*\(\s*([^,]+)\s*,\s*([^)]+)\)",
+            "texture2D($1, $2)");
+
+        code = Regex.Replace(code,
+            @"UNITY_SAMPLE_TEX2D_SAMPLER\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)",
+            "texture2D($1, $3)");
+
+        // 移除Unity相关的空语句和多余空行
+        code = Regex.Replace(code, @"\n\s*\n\s*\n+", "\n\n");
+
+        // ============================================
+        // 阶段0.5: 修复错误的变量声明链和类型不匹配
+        // ============================================
+
+        // 检测并修复类型不匹配的连续赋值
+        // 例如: vec4 a = vec4 b = vec2 c = vec2(1, 2);
+        // 这种情况通常是由于Unity宏替换或者换行符丢失导致的
+
+        // 多遍处理，因为可能有多层嵌套
+        for (int pass = 0; pass < 3; pass++)
+        {
+            // 模式1: 检测 "类型1 变量1 = 类型2 变量2 =" 的模式
+            // 这会匹配链式赋值的前面部分，拆分成独立语句
+            code = Regex.Replace(code,
+                @"((?:vec[234]|float|int|mat[234])\s+\w+)\s*=\s*((?:vec[234]|float|int|mat[234])\s+\w+)\s*=",
+                match => {
+                    string decl1 = match.Groups[1].Value;  // vec4 a
+                    string decl2 = match.Groups[2].Value;  // vec4 b
+                    // 拆分成两个独立声明，第一个先初始化为默认值
+                    string type1 = Regex.Match(decl1, @"(vec[234]|float|int|mat[234])").Value;
+                    string defaultVal = GetDefaultValueForType(type1);
+                    return $"{decl1} = {defaultVal};\n        {decl2} =";
+                });
+
+            // 模式2: 检测 "类型1 变量1 = 类型2 变量2 = 表达式;" 且类型不同
+            code = Regex.Replace(code,
+                @"(vec[234]|float|int|mat[234])\s+(\w+)\s*=\s*(vec[234]|float|int|mat[234])\s+(\w+)\s*=\s*([^;]+);",
+                match => {
+                    string type1 = match.Groups[1].Value;
+                    string var1 = match.Groups[2].Value;
+                    string type2 = match.Groups[3].Value;
+                    string var2 = match.Groups[4].Value;
+                    string expr = match.Groups[5].Value;
+
+                    // 如果类型不同，拆分声明
+                    if (type1 != type2)
+                    {
+                        string defaultVal1 = GetDefaultValueForType(type1);
+                        return $"{type1} {var1} = {defaultVal1};\n        {type2} {var2} = {expr};";
+                    }
+                    // 类型相同，保持原样（这是合法的链式赋值）
+                    return match.Value;
+                });
+        }
+
+        // 模式3: 修复语句合并导致的缺少换行问题
+        // vec4 screenColor01 = ...; vec4 screenColor02 = ...（缺少换行）
+        code = Regex.Replace(code,
+            @";\s*((?:vec[234]|float|int|mat[234])\s+\w+\s*=)",
+            ";\n        $1");
+
+        // 模式4: 清理可能产生的多余空行
+        code = Regex.Replace(code, @"\n\s*\n\s*\n+", "\n\n");
+
+        // 模式4.5: 移除未使用的varying声明（避免编译错误）
+        // 检测varying声明但在代码中从未使用的变量
+        var varyingMatches = Regex.Matches(code, @"varying\s+(vec[234]|float|int|mat[234])\s+(\w+)\s*;");
+        foreach (Match match in varyingMatches)
+        {
+            string varyingName = match.Groups[2].Value;
+            // 检查这个varying是否在代码中被使用（赋值或读取）
+            string usagePattern = $@"\b{varyingName}\s*[=\.]";
+            if (!Regex.IsMatch(code, usagePattern))
+            {
+                // 未使用，移除声明
+                code = code.Replace(match.Value, $"// {match.Value} (unused)");
+            }
+        }
+
+        // 模式5: 修复不完整的赋值语句（变量声明后面只有 = )
+        // vec4 x = ); -> 删除整行
+        code = Regex.Replace(code,
+            @"(?:vec[234]|float|int|mat[234])\s+\w+\s*=\s*\)\s*;",
+            "// removed incomplete assignment");
+
+        // 模式6: 修复vec类型之间的不匹配赋值
+        // vec4 x = expr.xy; -> vec4 x = vec4(expr.xy, 0.0, 0.0);
+        // vec2 x = vec4(...); -> vec2 x = vec4(...).xy;
+        // vec4 x = vec2(...); -> vec4 x = vec4(vec2(...), 0.0, 0.0);
+
+        // 修复6a: vec4 = xxx.xy（vec2赋值给vec4）
+        code = Regex.Replace(code,
+            @"(vec4)\s+(\w+)\s*=\s*([^;]+\.xy)(?!\s*[,\)])\s*;",
+            match => {
+                string type = match.Groups[1].Value;
+                string varName = match.Groups[2].Value;
+                string expr = match.Groups[3].Value;
+                // 如果表达式很简单（单个变量.xy），可能原意是使用整个vec4
+                if (Regex.IsMatch(expr, @"^\w+\.xy$"))
+                {
+                    string baseVar = expr.Substring(0, expr.Length - 3);
+                    return $"{type} {varName} = {baseVar};";
+                }
+                return $"{type} {varName} = vec4({expr}, 0.0, 0.0);";
+            });
+
+        // 修复6b: vec2 = vec4(...)（vec4赋值给vec2）
+        code = Regex.Replace(code,
+            @"(vec2)\s+(\w+)\s*=\s*(vec4\([^)]+\))\s*;",
+            match => {
+                string type = match.Groups[1].Value;
+                string varName = match.Groups[2].Value;
+                string expr = match.Groups[3].Value;
+                return $"{type} {varName} = {expr}.xy;";
+            });
+
+        // 修复6c: vec4 = vec2(...)（vec2赋值给vec4）
+        code = Regex.Replace(code,
+            @"(vec4)\s+(\w+)\s*=\s*(vec2\([^)]+\))\s*;",
+            match => {
+                string type = match.Groups[1].Value;
+                string varName = match.Groups[2].Value;
+                string expr = match.Groups[3].Value;
+                return $"{type} {varName} = vec4({expr}, 0.0, 0.0);";
+            });
+
+        // ============================================
+        // 阶段1: 修复vec2运算中的vec4变量（自动添加.xy）
+        // ============================================
+
+        // 修复1a: vec2(...) + v_Texcoord0  -> vec2(...) + v_Texcoord0.xy
+        code = Regex.Replace(code,
+            @"(vec2\s*\([^)]+\))\s*([\+\-])\s*v_Texcoord0(?!\.)",
+            "$1 $2 v_Texcoord0.xy");
+
+        // 修复1b: v_Texcoord0 + vec2(...)  -> v_Texcoord0.xy + vec2(...)
+        code = Regex.Replace(code,
+            @"\bv_Texcoord0(?!\.)\s*([\+\-])\s*(vec2\s*\()",
+            "v_Texcoord0.xy $1 $2");
+
+        // 修复1c: texture2D参数中的vec4变量（强制修复，多次应用）
+        // 第一遍：直接在texture2D第二个参数开头的v_Texcoord0
+        code = Regex.Replace(code,
+            @"texture2D\s*\(\s*(\w+)\s*,\s*v_Texcoord0(?!\.)",
+            "texture2D($1, v_Texcoord0.xy");
+
+        // 第二遍：texture2D内部任何位置的v_Texcoord0
+        // 匹配整个texture2D调用，修复其中的v_Texcoord0
+        code = Regex.Replace(code,
+            @"texture2D\s*\([^)]+\)",
+            match => {
+                string texCall = match.Value;
+                // 在这个texture2D调用内部，为所有v_Texcoord0添加.xy
+                texCall = Regex.Replace(texCall, @"\bv_Texcoord0(?!\.)", "v_Texcoord0.xy");
+                return texCall;
+            });
+
+        // 修复1d: vec2()构造函数的参数中出现vec4
+        // vec2(expr + v_Texcoord0) -> vec2(expr + v_Texcoord0.xy)
+        code = Regex.Replace(code,
+            @"vec2\s*\(([^)]*)\bv_Texcoord0(?!\.)\b([^)]*)\)",
+            match => {
+                string content = match.Groups[1].Value + "v_Texcoord0.xy" + match.Groups[2].Value;
+                return $"vec2({content})";
+            });
+
+        // ============================================
+        // 阶段2: 修复vec4 uniform在vec2上下文中的使用
+        // ============================================
+
+        // 修复2a: vec2运算中的vec4 uniform（如u_UVScroll, u_TilingOffset等）
+        string[] vec4Uniforms = { "u_UVScroll", "u_TilingOffset", "u_Scroll", "u_distort_tex_ST", "u_MainTex_ST" };
+        foreach (var uniformName in vec4Uniforms)
+        {
+            // 在vec2构造函数、texture2D、或vec2运算中，自动添加.xy
+            code = Regex.Replace(code,
+                $@"\b{uniformName}(?!\.)([\s\)\+\-\*,;])",
+                match => {
+                    string suffix = match.Groups[1].Value;
+                    // 检查上下文，如果在需要vec2的地方，添加.xy
+                    return $"{uniformName}.xy{suffix}";
+                });
+        }
+
+        // ============================================
+        // 阶段3: 通用整数字面量修复（整数->浮点数）
+        // ============================================
+
+        // ⭐ 核心原则：只转换数字字面量，不触碰标识符中的数字和浮点数
+        // 数字字面量定义：
+        //   - 前后都不是字母、数字、点号、下划线的数字序列
+        //   - 覆盖所有运算符：算术、比较、三元、逻辑等
+        //   - 排除数组索引（方括号内）
+        //   - 排除科学记数法中的指数部分（1e-5不转换成1e-5.0）
+
+        // 多遍扫描，确保完全转换
+        for (int pass = 0; pass < 2; pass++)
+        {
+            // 模式1a: 加减号（排除科学记数法） + 空格 + 整数
+            code = Regex.Replace(code, @"(?<![eE])([\+\-]\s+)(\d+)(?![0-9.a-zA-Z_])", "$1$2.0");
+
+            // 模式1b: 其他运算符 + 空格 + 整数
+            code = Regex.Replace(code, @"([\*\/%=<>!?:&|\(,]\s+)(\d+)(?![0-9.a-zA-Z_])", "$1$2.0");
+
+            // 模式2a: 加减号（排除科学记数法） + 整数（无空格）
+            code = Regex.Replace(code, @"(?<![eE])([\+\-])(\d+)(?![0-9.a-zA-Z_])", "$1$2.0");
+
+            // 模式2b: 其他运算符 + 整数（无空格）
+            code = Regex.Replace(code, @"([\*\/%=<>!?:&|\(,])(\d+)(?![0-9.a-zA-Z_])", "$1$2.0");
+
+            // 模式3: 整数 + 空格 + 运算符/分隔符
+            code = Regex.Replace(code, @"(?<![0-9.a-zA-Z_])(\d+)(\s+[\+\-\*\/%<>!?:&|\),;])", "$1.0$2");
+
+            // 模式4: 整数 + 运算符/分隔符（无空格）
+            code = Regex.Replace(code, @"(?<![0-9.a-zA-Z_])(\d+)([\+\-\*\/%<>!?:&|\),;])", "$1.0$2");
+        }
+
+        // 向量/矩阵构造函数中的整数
+        code = Regex.Replace(code,
+            @"(vec[234]|mat[234])\s*\(([^)]+)\)",
+            match => {
+                string vecType = match.Groups[1].Value;
+                string args = match.Groups[2].Value;
+                // 转换参数列表中的整数字面量（排除科学记数法）
+                args = Regex.Replace(args, @"(?<![eE])([,\(\+\-]\s*)(\d+)(?![0-9.a-zA-Z_])", "$1$2.0");
+                args = Regex.Replace(args, @"([,\(\*\/%<>!?:&|]\s*)(\d+)(?![0-9.a-zA-Z_])", "$1$2.0");
+                args = Regex.Replace(args, @"(?<![0-9.a-zA-Z_])(\d+)(\s*[,\)\+\-\*\/%<>!?:&|])", "$1.0$2");
+                return $"{vecType}({args})";
+            });
+
+        // ============================================
+        // 阶段4: 智能修复vec3/vec4变量的分量访问
+        // ============================================
+
+        // 已知的vec4变量列表
+        string[] vec4Vars = { "v_Color", "v_VertexColor", "u_TintColor", "u_AlbedoColor", "u_BaseColor", "u_Color" };
+
+        // 修复4a: .rgb 上下文中的vec4变量
+        // 匹配任何包含 .rgb 的赋值或运算语句
+        code = Regex.Replace(code,
+            @"((?:^|\s)(?:\w+\.)?rgb\s*[\*\+\-\/]?=\s*)([^;]+);",
+            match => {
+                string prefix = match.Groups[1].Value;
+                string expr = match.Groups[2].Value;
+
+                // 为所有vec4变量添加.rgb
+                foreach (var vec4Var in vec4Vars)
+                {
+                    // 只在没有分量访问的情况下添加.rgb
+                    expr = Regex.Replace(expr, $@"\b{vec4Var}(?!\.)", $"{vec4Var}.rgb");
+                }
+
+                // 清理重复
+                expr = Regex.Replace(expr, @"\.rgb\.rgb", ".rgb");
+
+                return $"{prefix}{expr};";
+            }, RegexOptions.Multiline);
+
+        // 修复4b: .rgb = 表达式中的vec4变量需要.rgb
+        code = Regex.Replace(code,
+            @"(\.rgb\s*=\s*)([^;]+);",
+            match => {
+                string prefix = match.Groups[1].Value;
+                string expr = match.Groups[2].Value;
+
+                foreach (var vec4Var in vec4Vars)
+                {
+                    expr = Regex.Replace(expr, $@"\b{vec4Var}(?!\.)", $"{vec4Var}.rgb");
+                }
+
+                expr = Regex.Replace(expr, @"\.rgb\.rgb", ".rgb");
+                return $"{prefix}{expr};";
+            });
+
+        // 修复4c: 表达式中vec4与xxx.rgb运算的情况
+        // 只要看到 xxx.rgb，那么同一运算中的vec4变量也需要.rgb
+        foreach (var vec4Var in vec4Vars)
+        {
+            // vec4 * xxx.rgb -> vec4.rgb * xxx.rgb
+            code = Regex.Replace(code,
+                $@"\b{vec4Var}(?!\.)\s*\*\s*(\w+)\.rgb",
+                $"{vec4Var}.rgb * $1.rgb");
+
+            // xxx.rgb * vec4 -> xxx.rgb * vec4.rgb
+            code = Regex.Replace(code,
+                $@"(\w+)\.rgb\s*\*\s*{vec4Var}(?!\.)",
+                $"$1.rgb * {vec4Var}.rgb");
+        }
+
+        // ============================================
+        // 阶段4.5: 修复.a分量运算中的vec4变量
+        // ============================================
+
+        // 修复4.5a: .a *= 表达式中的v_Color需要.a
+        code = Regex.Replace(code,
+            @"(\.a\s*[\*\+\-]?=\s*)([^;]+);",
+            match => {
+                string prefix = match.Groups[1].Value;
+                string expr = match.Groups[2].Value;
+
+                // 在表达式中为v_Color添加.a（如果后面不是.rgb也不是.a）
+                expr = Regex.Replace(expr, @"\bv_Color(?!\.(?:rgb|a))\b", "v_Color.a");
+                expr = Regex.Replace(expr, @"\bv_VertexColor(?!\.(?:rgb|a))\b", "v_VertexColor.a");
+
+                // 修复可能的重复.a.a
+                expr = Regex.Replace(expr, @"v_Color\.a\.a", "v_Color.a");
+                expr = Regex.Replace(expr, @"v_VertexColor\.a\.a", "v_VertexColor.a");
+
+                return $"{prefix}{expr};";
+            });
+
+        // 修复4.5b: xxx.a * v_Color -> xxx.a * v_Color.a
+        code = Regex.Replace(code,
+            @"(\w+)\.a\s*\*\s*v_Color(?!\.)",
+            "$1.a * v_Color.a");
+
+        // 修复4.5c: v_Color * xxx.a -> v_Color.a * xxx.a
+        code = Regex.Replace(code,
+            @"\bv_Color(?!\.)\s*\*\s*(\w+)\.a\b",
+            "v_Color.a * $1.a");
+
+        // ============================================
+        // 阶段4.6: 通用vec4 Color类型uniform的分量修复
+        // ============================================
+
+        // 已知的vec4/Color类型变量
+        string[] vec4ColorVars = { "v_Color", "v_VertexColor", "u_TintColor", "u_AlbedoColor", "u_BaseColor", "u_Color" };
+
+        foreach (var colorVar in vec4ColorVars)
+        {
+            // 在.rgb上下文中自动添加.rgb
+            code = Regex.Replace(code,
+                $@"\b{colorVar}(?!\.)\s*\*\s*(\w+)\.rgb",
+                $"{colorVar}.rgb * $1.rgb");
+
+            code = Regex.Replace(code,
+                $@"(\w+)\.rgb\s*\*\s*{colorVar}(?!\.)",
+                $"$1.rgb * {colorVar}.rgb");
+
+            // 在.a上下文中自动添加.a
+            code = Regex.Replace(code,
+                $@"\b{colorVar}(?!\.(?:rgb|a))\s*\*\s*(\w+)\.a",
+                $"{colorVar}.a * $1.a");
+
+            code = Regex.Replace(code,
+                $@"(\w+)\.a\s*\*\s*{colorVar}(?!\.(?:rgb|a))",
+                $"$1.a * {colorVar}.a");
+        }
+
+        // ============================================
+        // 阶段5: 修复vec2()构造函数中的问题
+        // ============================================
+
+        // 修复5a: vec2(vec4的分量运算)
+        // 查找所有vec2(...)中的内容，检查是否有未处理的vec4变量
+        code = Regex.Replace(code,
+            @"vec2\s*\(\s*\(\s*([^)]+)\s*\)\s*\)",
+            match => {
+                string inner = match.Groups[1].Value;
+                // 如果inner包含_ST但没有.xy/.zw，添加.xy
+                if (inner.Contains("_ST") && !inner.Contains(".xy") && !inner.Contains(".zw"))
+                {
+                    inner = Regex.Replace(inner, @"\b(\w+_ST)(?!\.)", "$1.xy");
+                }
+                return $"vec2(({inner}))";
+            });
+
+        // ============================================
+        // 阶段6: 强制修复特定的已知vec4变量在vec2上下文中的使用
+        // ============================================
+
+        // ⭐ 修复6: 智能处理v_Texcoord0的分量访问
+        // 关键：根据赋值目标类型决定是否需要.xy
+
+        // 修复6a: vec2 = v_Texcoord0 -> vec2 = v_Texcoord0.xy
+        code = Regex.Replace(code,
+            @"(vec2\s+\w+\s*=\s*)v_Texcoord0(?!\.)",
+            "$1v_Texcoord0.xy");
+
+        // 修复6b: 已有vec2变量赋值 = v_Texcoord0 -> = v_Texcoord0.xy
+        code = Regex.Replace(code,
+            @"(?<=\s)(\w+\.(?:xy|rg))\s*=\s*v_Texcoord0(?!\.)",
+            "$1 = v_Texcoord0.xy");
+
+        // 修复6c: vec4 = v_Texcoord0.xy -> vec4 = v_Texcoord0 (移除不必要的.xy)
+        code = Regex.Replace(code,
+            @"(vec4\s+\w+\s*=\s*)v_Texcoord0\.xy(?!\s*[,\+\-\*\/])",
+            "$1v_Texcoord0");
+
+        // 修复6d: texture2D中的v_Texcoord0如果没有分量，添加.xy
+        // 已经在阶段1中处理过了，这里只清理重复
+
+        // 修复6e: 移除可能产生的重复.xy或错误的分量组合
+        code = Regex.Replace(code, @"v_Texcoord0\.xy\.xy", "v_Texcoord0.xy");
+        code = Regex.Replace(code, @"v_Texcoord0\.xy\.zw", "v_Texcoord0.xy");
+        code = Regex.Replace(code, @"v_Texcoord0\.xy\.x(?!y)", "v_Texcoord0.x");
+        code = Regex.Replace(code, @"v_Texcoord0\.xy\.y(?!x)", "v_Texcoord0.y");
+        code = Regex.Replace(code, @"v_Texcoord0\.xy\.r", "v_Texcoord0.x");
+        code = Regex.Replace(code, @"v_Texcoord0\.xy\.g", "v_Texcoord0.y");
+
+        // ============================================
+        // 阶段7: 最后清理：确保所有_ST uniforms在需要vec2的地方有.xy
+        // ============================================
+
+        // 修复7a: 在texture2D的第二个参数中，_ST应该有.xy或.zw
+        code = Regex.Replace(code,
+            @"texture2D\s*\([^,]+,\s*([^)]*)\)",
+            match => {
+                string args = match.Value;
+                // 在纹理坐标参数中，为所有_ST添加.xy（如果没有）
+                args = Regex.Replace(args, @"\b(\w+_ST)(?!\.(?:xy|zw))\b", "$1.xy");
+                return args;
+            });
+
+        // 修复7b: vec2构造函数中的_ST
+        code = Regex.Replace(code,
+            @"vec2\s*\([^)]*\)",
+            match => {
+                string vecExpr = match.Value;
+                // 在vec2(...)中为_ST添加.xy
+                vecExpr = Regex.Replace(vecExpr, @"\b(\w+_ST)(?!\.(?:xy|zw))\b", "$1.xy");
+                return vecExpr;
+            });
+
+        // ============================================
+        // 阶段7.5: 修复texture()函数调用（GLSL ES 2.0不支持texture()）
+        // ============================================
+
+        // GLSL ES 2.0只支持texture2D(), texture2DProj(), textureCube()等
+        // texture()是GLSL ES 3.0的函数，需要替换为texture2D()
+        code = Regex.Replace(code,
+            @"\btexture\s*\(",
+            "texture2D(");
+
+        // ============================================
+        // 阶段8: 修复加法/减法运算中的向量类型不匹配
+        // ============================================
+
+        // 修复8a: vec2 + vec4 -> vec2 + vec4.xy
+        // 修复8b: vec3 + vec4 -> vec3 + vec4.rgb
+        // 修复8c: vec4 + vec2 -> vec4 + vec4(vec2, 0.0, 0.0)
+
+        // 检测所有加减法运算，分析左右操作数的类型
+        // 模式：(类型 变量 = 表达式 +/- 表达式)
+
+        // 修复8a: 在加减法中，如果发现vec4变量与vec2类型运算，自动添加.xy
+        code = Regex.Replace(code,
+            @"(vec2\s*\([^)]+\))\s*([\+\-])\s*\bv_Texcoord0(?!\.)",
+            "$1 $2 v_Texcoord0.xy");
+
+        code = Regex.Replace(code,
+            @"\bv_Texcoord0(?!\.)\s*([\+\-])\s*(vec2\s*\()",
+            "v_Texcoord0.xy $1 $2");
+
+        // 修复8b: vec4 uniforms与vec2类型运算
+        foreach (var uniformName in vec4Uniforms)
+        {
+            // vec2(...) + u_Uniform -> vec2(...) + u_Uniform.xy
+            code = Regex.Replace(code,
+                $@"(vec2\s*\([^)]+\))\s*([\+\-])\s*\b{uniformName}(?!\.)",
+                $"$1 $2 {uniformName}.xy");
+
+            // u_Uniform + vec2(...) -> u_Uniform.xy + vec2(...)
+            code = Regex.Replace(code,
+                $@"\b{uniformName}(?!\.)\s*([\+\-])\s*(vec2\s*\()",
+                $"{uniformName}.xy $1 $2");
+        }
+
+        // 修复8c: 在赋值语句中检测类型不匹配的加法
+        // vec2 result = expr + v_Texcoord0 -> vec2 result = expr + v_Texcoord0.xy
+        code = Regex.Replace(code,
+            @"(vec2\s+\w+\s*=\s*[^;]*)([\+\-])\s*v_Texcoord0(?!\.)",
+            match => {
+                string prefix = match.Groups[1].Value;
+                string op = match.Groups[2].Value;
+                // 检查prefix中是否已经有v_Texcoord0.xy
+                if (prefix.Contains("v_Texcoord0.xy"))
+                    return match.Value;
+                return $"{prefix}{op} v_Texcoord0.xy";
+            });
+
         return code;
     }
 
@@ -2729,27 +5310,58 @@ internal class CustomShaderExporter
     /// </summary>
     private static string ValidateAndCleanGLSL(string code)
     {
-        // 检查括号匹配
+        // ========== 第一步：检查括号匹配 ==========
         int parenCount = 0;
         int braceCount = 0;
         int bracketCount = 0;
-        
+        bool inString = false;
+        bool inComment = false;
+        bool inLineComment = false;
+        char prevChar = '\0';
+
         foreach (char c in code)
         {
-            switch (c)
+            // 跳过字符串和注释中的括号
+            if (c == '"' && prevChar != '\\')
             {
-                case '(': parenCount++; break;
-                case ')': parenCount--; break;
-                case '{': braceCount++; break;
-                case '}': braceCount--; break;
-                case '[': bracketCount++; break;
-                case ']': bracketCount--; break;
+                inString = !inString;
             }
+            else if (!inString && c == '/' && prevChar == '/')
+            {
+                inLineComment = true;
+            }
+            else if (!inString && c == '*' && prevChar == '/')
+            {
+                inComment = true;
+            }
+            else if (inComment && c == '/' && prevChar == '*')
+            {
+                inComment = false;
+            }
+            else if (inLineComment && c == '\n')
+            {
+                inLineComment = false;
+            }
+            else if (!inString && !inComment && !inLineComment)
+            {
+                switch (c)
+                {
+                    case '(': parenCount++; break;
+                    case ')': parenCount--; break;
+                    case '{': braceCount++; break;
+                    case '}': braceCount--; break;
+                    case '[': bracketCount++; break;
+                    case ']': bracketCount--; break;
+                }
+            }
+
+            prevChar = c;
         }
-        
+
+        // 报告括号问题
         if (parenCount != 0)
         {
-            Debug.LogWarning($"LayaAir3D: GLSL code has unbalanced parentheses: {parenCount}");
+            Debug.LogWarning($"LayaAir3D: GLSL code has unbalanced parentheses: {parenCount} (+ indicates extra '(', - indicates extra ')')");
         }
         if (braceCount != 0)
         {
@@ -2759,16 +5371,278 @@ internal class CustomShaderExporter
         {
             Debug.LogWarning($"LayaAir3D: GLSL code has unbalanced brackets: {bracketCount}");
         }
-        
+
+        // ========== 第二步：检查常见的GLSL错误 ==========
+
+        // 检查是否有Unity特有的函数未转换
+        string[] unityFunctions = { "UnityObjectToClipPos", "UnityWorldToClipPos", "UNITY_MATRIX_", "tex2Dlod" };
+        foreach (var func in unityFunctions)
+        {
+            if (code.Contains(func))
+            {
+                Debug.LogWarning($"LayaAir3D: Found Unity-specific function '{func}' in GLSL code - may need manual conversion");
+            }
+        }
+
+        // 检查是否有HLSL类型未转换
+        if (code.Contains("half") && !code.Contains("// half"))
+        {
+            Debug.LogWarning("LayaAir3D: Found HLSL 'half' type - should be converted to 'float' in GLSL");
+            code = Regex.Replace(code, @"\bhalf\b", "float");
+        }
+        if (code.Contains("fixed") && !code.Contains("// fixed"))
+        {
+            Debug.LogWarning("LayaAir3D: Found HLSL 'fixed' type - should be converted to 'float' in GLSL");
+            code = Regex.Replace(code, @"\bfixed\b", "float");
+        }
+
+        // 检查是否有错误的向量构造（如vec3(0.0)应该是vec3(0.0, 0.0, 0.0)）
+        var singleArgVecs = Regex.Matches(code, @"\b(vec[234])\s*\(\s*([0-9.]+)\s*\)");
+        if (singleArgVecs.Count > 0)
+        {
+            Debug.LogWarning($"LayaAir3D: Found {singleArgVecs.Count} single-argument vector constructor(s) - these are valid but may indicate hardcoded values");
+        }
+
+        // ========== 第三步：语法清理 ==========
+
+        // ===== 修复texture2D参数类型错误 =====
+        // texture2D的第二个参数应该是vec2，不应该被包装成vec4
+        // 修复: texture2D(tex, vec4(...).xy) -> texture2D(tex, ...)
+        code = Regex.Replace(code, @"texture2D\s*\(\s*([^,]+),\s*vec4\s*\(([^)]+)\)\s*\.xy\s*\)", "texture2D($1, $2)");
+
+        // ===== 修复vec2 += vec4类型不匹配 =====
+        // 修复: vec2变量 += texture2D(...) -> vec2变量 += texture2D(...).xy
+        code = Regex.Replace(code, @"(\b\w+UV\b)\s*\+=\s*(texture2D\s*\([^)]+\))\s*\*", "$1 += $2.xy *");
+
+        // ===== 修复错误的分号位置 =====
+        // 修复多余的单独分号行（通常在逗号后）
+        code = Regex.Replace(code, @",\s*\n\s*;\s*\n", ",\n");
+
+        // 修复单独的分号行（if/else后面的孤立分号）
+        code = Regex.Replace(code, @"(if|else|else\s+if)\s*\([^)]*\)\s*\n\s*;\s*\n", "$1($2)\n");
+
+        // ===== 修复transpose(inverse(...))语法错误 - 通用方案 =====
+        // 不限定特定矩阵变量名（如u_View），匹配所有这种模式
+
+        // ⭐ STEP 1: 首先处理最复杂的模式 - 带有mat3包装的完整错误模式
+        // 通用匹配: (mat3(transpose); (inverse(任何矩阵)) * xxx)
+        code = Regex.Replace(code,
+            @"\(\s*mat3\s*\(\s*transpose\s*\)\s*;\s*\(\s*inverse\s*\(\s*(\w+)\s*\)\s*\)\s*\*\s*([^)]+)\s*\)",
+            "mat3(transpose(inverse($1))) * $2");
+
+        // ⭐ STEP 2: 修复分号问题（通用）
+        // 修复: transpose); (inverse -> transpose(inverse
+        code = Regex.Replace(code, @"transpose\s*\)\s*;\s*\(\s*inverse", "transpose(inverse");
+
+        // ⭐ STEP 3: 修复mat3嵌套调用的语法错误（通用）
+        // 修复完整模式: (mat3(transpose(inverse(xxx)) * 应该是 mat3(transpose(inverse(xxx))) *
+        code = Regex.Replace(code, @"\(\s*mat3\s*\(\s*transpose\s*\(\s*inverse\s*\(\s*([^)]+)\s*\)\s*\)\s*\*", "mat3(transpose(inverse($1))) *");
+
+        // 修复没有前置括号的情况
+        code = Regex.Replace(code, @"mat3\s*\(\s*transpose\s*\(\s*inverse\s*\(\s*([^)]+)\s*\)\s*\)\s*\*", "mat3(transpose(inverse($1))) *");
+
+        // ⭐ STEP 4: 修复另一种模式: mat3(inverse(transpose(...))) 顺序错误（通用）
+        code = Regex.Replace(code, @"mat3\s*\(\s*inverse\s*\(\s*transpose\s*\(\s*([^)]+)\s*\)\s*\)\s*\)", "mat3(transpose(inverse($1)))");
+
+        // ⭐ STEP 5: 修复缺少mat3闭合括号的情况（通用）
+        // 查找: mat3(transpose(inverse(xxx)) 后面直接跟 * 或 ) ，缺少一个闭合括号
+        code = Regex.Replace(code, @"mat3\s*\(\s*transpose\s*\(\s*inverse\s*\(\s*([^)]+)\s*\)\s*\)\s*\)(?=\s*[*)])", "mat3(transpose(inverse($1)))");
+
+        // ⭐ STEP 6: 修复遗留的复杂模式（通用）
+        // 修复: (mat3(...); (...)) 带有分号和多余括号的情况
+        code = Regex.Replace(code, @"\(\s*mat3\s*\([^;]+transpose[^;]+\)\s*;\s*\([^)]*inverse[^)]+\)\s*\*\s*(\w+)\s*\)\)",
+            m => {
+                // 提取inverse中的矩阵变量名
+                var inverseMatch = Regex.Match(m.Value, @"inverse\s*\(\s*(\w+)\s*\)");
+                // 提取最后的被乘变量名
+                var varMatch = Regex.Match(m.Value, @"\*\s*(\w+)\s*\)");
+
+                if (inverseMatch.Success && varMatch.Success)
+                {
+                    string matrixName = inverseMatch.Groups[1].Value;
+                    string varName = varMatch.Groups[1].Value;
+                    return $"mat3(transpose(inverse({matrixName}))) * {varName}";
+                }
+
+                return m.Value;
+            });
+
+        // ⭐ 修复mix函数的类型精确性
+        // 当给vec3变量赋值时，mix的参数应该是vec3而不是标量
+        // 模式: vec3 xxx = mix(0.0, 1.0, ...) 或 vec3 xxx = mix(0, 1, ...)
+        code = Regex.Replace(code, @"(vec3\s+\w+\s*=\s*mix\s*\()\s*0\.0\s*,\s*1\.0\s*,", "$1vec3(0.0), vec3(1.0),");
+        code = Regex.Replace(code, @"(vec3\s+\w+\s*=\s*mix\s*\()\s*0\s*,\s*1\s*,", "$1vec3(0.0), vec3(1.0),");
+
+        // 处理已存在vec3变量的赋值
+        // 收集所有vec3变量
+        var vec3VarMatches = Regex.Matches(code, @"vec3\s+(\w+)");
+        var vec3Vars = new HashSet<string>();
+        foreach (Match m in vec3VarMatches)
+        {
+            vec3Vars.Add(m.Groups[1].Value);
+        }
+
+        // 修复这些vec3变量的mix赋值
+        foreach (var varName in vec3Vars)
+        {
+            // 模式: vec3Var = mix(0.0, 1.0, ...)
+            code = Regex.Replace(code, $@"({varName}\s*=\s*mix\s*\()\s*0\.0\s*,\s*1\.0\s*,", "$1vec3(0.0), vec3(1.0),");
+            code = Regex.Replace(code, $@"({varName}\s*=\s*mix\s*\()\s*0\s*,\s*1\s*,", "$1vec3(0.0), vec3(1.0),");
+        }
+
+        // ⭐ 修复mat2构造函数 - GLSL使用列优先矩阵 [完全通用方案]
+        // GLSL中mat2是列优先，对于2D旋转矩阵：
+        // Unity HLSL风格（行优先）: mat2(a, -b, b, a)
+        // GLSL风格（列优先）: mat2(a, b, -b, a)
+        // 通用模式：mat2(变量1, -变量2, 变量2, 变量1) -> mat2(变量1, 变量2, -变量2, 变量1)
+
+        // 匹配任意变量名的模式：mat2(X, -Y, Y, X) -> mat2(X, Y, -Y, X)
+        code = Regex.Replace(code,
+            @"mat2\s*\(\s*(\w+)\s*,\s*-(\w+)\s*,\s*\2\s*,\s*\1\s*\)",
+            "mat2($1, $2, -$2, $1)");
+
+        // 处理换行的情况
+        code = Regex.Replace(code,
+            @"mat2\s*\(\s*(\w+)\s*,\s*-(\w+)\s*,\s*\n\s*\2\s*,\s*\1\s*\)",
+            "mat2($1, $2, -$2, $1)");
+
+        // ⭐ 修复矩阵乘法顺序 - 完全通用方案，基于类型系统
+        // GLSL中矩阵乘法: mat * vec，而不是 vec * mat
+        // 通过类型推断识别矩阵变量，而不是依赖命名习惯
+
+        // 步骤1: 收集所有矩阵类型变量（mat2, mat3, mat4）
+        var matrixVarPattern = @"(mat[234])\s+(\w+)\s*=";
+        var matrixVarMatches = Regex.Matches(code, matrixVarPattern);
+        var matrixVars = new Dictionary<string, string>(); // 变量名 -> 类型
+        foreach (Match m in matrixVarMatches)
+        {
+            string matType = m.Groups[1].Value;
+            string varName = m.Groups[2].Value;
+            if (!matrixVars.ContainsKey(varName))
+            {
+                matrixVars.Add(varName, matType);
+            }
+        }
+
+        // 步骤2: 修复这些矩阵变量的乘法顺序
+        foreach (var kvp in matrixVars)
+        {
+            string matVar = kvp.Key;
+            // 匹配: (非矩阵变量 * 矩阵变量) -> (矩阵变量 * 非矩阵变量)
+            // 确保第一个操作数不是矩阵类型
+            code = Regex.Replace(code,
+                $@"\((\w+)\s*\*\s*{Regex.Escape(matVar)}\)",
+                m => {
+                    string firstOperand = m.Groups[1].Value;
+                    // 如果第一个操作数也是矩阵，不修改（矩阵与矩阵相乘顺序可能是正确的）
+                    if (matrixVars.ContainsKey(firstOperand))
+                    {
+                        return m.Value;
+                    }
+                    // 否则，交换顺序
+                    return $"({matVar} * {firstOperand})";
+                });
+        }
+
+        // ⭐ 修复变量赋值后的条件修改顺序 - 完全通用方案
+        // 检测模式：变量A = 变量B; 后跟 #ifdef ... 变量A *= 变量C; #endif
+        // 这种模式应该改为：#ifdef ... 变量B *= 变量C; #endif 然后 变量A = 变量B;
+        // 不依赖特定变量名，适用于所有这种模式
+
+        // 通用模式：匹配 "变量A = 变量B;" 后面跟 "#ifdef ... 变量A *= 变量C; #endif"
+        var postAssignModPattern = @"(\w+)\s*=\s*(\w+)\s*;\s*\n\s*(#ifdef\s+\w+\s*\n\s*(?:\/\/[^\n]*\n\s*)?\1\s*\*=\s*\w+\s*;\s*\n\s*#endif)";
+        var postAssignMatches = Regex.Matches(code, postAssignModPattern, RegexOptions.Singleline);
+
+        foreach (Match match in postAssignMatches)
+        {
+            string targetVar = match.Groups[1].Value;  // 被赋值的变量
+            string sourceVar = match.Groups[2].Value;  // 源变量
+            string conditionalBlock = match.Groups[3].Value;  // 条件修改块
+
+            // 提取条件宏和修改变量
+            var detailMatch = Regex.Match(conditionalBlock, $@"#ifdef\s+(\w+).*?{Regex.Escape(targetVar)}\s*\*=\s*(\w+)\s*;.*?#endif", RegexOptions.Singleline);
+            if (detailMatch.Success)
+            {
+                string defineVar = detailMatch.Groups[1].Value;
+                string modifierVar = detailMatch.Groups[2].Value;
+
+                // 查找源变量的最后一次修改（在赋值之前）
+                // 模式1：sourceVar.xxx = ...
+                // 模式2：sourceVar *= += -= /= ...
+                var lastModPatterns = new[] {
+                    $@"({Regex.Escape(sourceVar)}\.[\w]+\s*=\s*[^;]+;)\s*\n\s*{Regex.Escape(targetVar)}\s*=\s*{Regex.Escape(sourceVar)}\s*;",
+                    $@"({Regex.Escape(sourceVar)}\s*[*+/\-]=\s*[^;]+;)\s*\n\s*{Regex.Escape(targetVar)}\s*=\s*{Regex.Escape(sourceVar)}\s*;"
+                };
+
+                bool isFixed = false;
+                foreach (var lastModPattern in lastModPatterns)
+                {
+                    var lastModMatch = Regex.Match(code, lastModPattern);
+                    if (lastModMatch.Success)
+                    {
+                        // 在源变量最后修改后，目标赋值前插入条件修改
+                        string insertion = $@"
+#ifdef {defineVar}
+        {sourceVar} *= {modifierVar};
+#endif";
+
+                        string replacement = lastModMatch.Groups[1].Value + insertion + $"\n        {targetVar} = {sourceVar};";
+                        code = Regex.Replace(code, lastModPattern, replacement);
+
+                        // 移除原来的后置条件编译块
+                        code = code.Replace(conditionalBlock, "");
+
+                        Debug.Log($"LayaAir3D: Fixed post-assignment conditional modification - {modifierVar} applied to {sourceVar} before {targetVar} assignment");
+                        isFixed = true;
+                        break;
+                    }
+                }
+
+                // 如果找不到明确的最后修改，尝试直接在赋值前插入
+                if (!isFixed)
+                {
+                    var simplePattern = $@"{Regex.Escape(targetVar)}\s*=\s*{Regex.Escape(sourceVar)}\s*;";
+                    var simpleMatch = Regex.Match(code, simplePattern);
+                    if (simpleMatch.Success)
+                    {
+                        string insertion = $@"#ifdef {defineVar}
+        {sourceVar} *= {modifierVar};
+#endif
+        ";
+                        string replacement = insertion + simpleMatch.Value;
+                        code = code.Replace(simpleMatch.Value, replacement);
+
+                        // 移除原来的后置条件编译块
+                        code = code.Replace(conditionalBlock, "");
+
+                        Debug.Log($"LayaAir3D: Fixed post-assignment conditional modification (simple) - {modifierVar} applied before {targetVar} = {sourceVar}");
+                    }
+                }
+            }
+        }
+
         // 移除多余的空语句
         code = Regex.Replace(code, @";\s*;", ";");
-        
-        // 移除空的if语句
-        code = Regex.Replace(code, @"if\s*\([^)]*\)\s*;", "");
-        
+
+        // 移除空的if语句（if后只有分号）
+        code = Regex.Replace(code, @"if\s*\([^)]*\)\s*;\s*\n", "");
+        code = Regex.Replace(code, @"else\s+if\s*\([^)]*\)\s*;\s*\n", "");
+        code = Regex.Replace(code, @"else\s*;\s*\n", "");
+
+        // 修复三元运算符和vec2构造器换行导致的逗号分号问题
+        // 匹配: 逗号后跟分号（错误的语法）
+        code = Regex.Replace(code, @",\s*;\s*", ", ");
+
+        // 修复函数调用被错误换行的情况
+        // 例如: func(a,\n;\nb) -> func(a,\nb)
+        code = Regex.Replace(code, @",\s*\n\s*;\s*\n\s*", ",\n    ");
+
+        // 修复u_NormalMap_ST -> u_NormalTexture_ST
+        code = Regex.Replace(code, @"\bu_NormalMap_ST\b", "u_NormalTexture_ST");
+
         // 移除残留的无效声明（如 vec2.0 o; 等）
         code = Regex.Replace(code, @"\b(vec2|vec3|vec4|float|int|mat2|mat3|mat4)\s*\.\s*\d+\s+\w+\s*;", "");
-        
+
         // 移除空的struct声明
         code = Regex.Replace(code, @"struct\s+\w+\s*\{\s*\}\s*;?", "");
         
@@ -2783,9 +5657,13 @@ internal class CustomShaderExporter
         // 修复语法问题
         // ============================================
         
-        // 修复缺少分号的语句（在行尾的赋值/声明后）
-        // 匹配：变量赋值后没有分号，后面紧跟换行
-        code = Regex.Replace(code, @"(\w+\s*=\s*[^;{}\n]+)(\s*\n\s*(?![\s{]))", "$1;$2");
+        // ⭐ 修复缺少分号的语句（在行尾的赋值/声明后）
+        // 注意：必须排除if/while/for等控制流语句中的条件表达式，否则会错误地在if(condition)后加分号
+        // 匹配：行首的变量赋值（不在括号内）后没有分号，后面紧跟换行
+        // 使用更精确的模式：不匹配括号内的等号（避免匹配if (x == 0)这种情况）
+        // code = Regex.Replace(code, @"(\w+\s*=\s*[^;{}\n]+)(\s*\n\s*(?![\s{]))", "$1;$2");
+        // ⭐ 注释掉上面的正则，因为它会错误地给if (condition)添加分号
+        // 如果代码是从ParticleShaderTemplate生成的，应该已经有正确的分号
         
         // 修复括号位置错误：) 后面紧跟 ( 应该有操作符或分号
         // 例如：)(  可能是漏了分号或操作符
@@ -2812,8 +5690,948 @@ internal class CustomShaderExporter
         
         // 修复 #endif 后面可能缺少换行
         code = Regex.Replace(code, @"(#endif)([^\s\n])", "$1\n$2");
-        
+
         return code;
+    }
+
+    /// <summary>
+    /// 格式化shader内容，提升可读性
+    /// </summary>
+    private static string FormatShaderContent(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return content;
+
+        // 第一步：基础清理
+        content = Regex.Replace(content, @"[ \t]+$", "", RegexOptions.Multiline); // 移除行尾空白
+        content = Regex.Replace(content, @"\n{3,}", "\n\n"); // 最多保留一个空行
+
+        // 第二步：分离Shader3D块和GLSL块进行格式化
+        var parts = SplitShaderIntoParts(content);
+        var formattedParts = new List<string>();
+
+        foreach (var part in parts)
+        {
+            if (part.type == ShaderPartType.Shader3D)
+            {
+                formattedParts.Add(FormatShader3DBlock(part.content));
+            }
+            else if (part.type == ShaderPartType.GLSL)
+            {
+                formattedParts.Add(FormatGLSLBlock(part.content));
+            }
+            else
+            {
+                formattedParts.Add(part.content);
+            }
+        }
+
+        // 合并并最终清理
+        string result = string.Join("\n\n", formattedParts);
+        result = Regex.Replace(result, @"\n{3,}", "\n\n"); // 再次清理多余空行
+        result = result.TrimEnd() + "\n"; // 确保文件末尾只有一个换行
+
+        return result;
+    }
+
+    /// <summary>
+    /// 修复shader中的GLSL类型不匹配问题
+    /// 主要解决v_Texcoord0 (vec4) 与 vec2 之间的类型转换问题
+    /// </summary>
+    private static string FixShaderTypeMismatch(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return content;
+
+        // ⭐ 0. 修复错误的swizzle访问 (CRITICAL FIX)
+        // vec2没有.z和.w分量，vec3没有.w分量，这是常见的GLSL类型错误
+        // 例如：u_TilingOffset.xy.z -> u_TilingOffset.z
+        // 这个修复必须在最前面，因为它修复的是根本性的类型错误
+
+        // 修复 .xy.z 和 .xy.w (vec2错误访问z/w分量)
+        content = Regex.Replace(content, @"(\w+)\.xy\.z\b", "$1.z");
+        content = Regex.Replace(content, @"(\w+)\.xy\.w\b", "$1.w");
+
+        // 修复 .xyz.w (vec3错误访问w分量)
+        content = Regex.Replace(content, @"(\w+)\.xyz\.w\b", "$1.w");
+
+        // 修复 .x.y / .x.z / .y.z 等单分量后再访问其他分量的错误
+        content = Regex.Replace(content, @"(\w+)\.x\.y\b", "$1.y");
+        content = Regex.Replace(content, @"(\w+)\.x\.z\b", "$1.z");
+        content = Regex.Replace(content, @"(\w+)\.x\.w\b", "$1.w");
+        content = Regex.Replace(content, @"(\w+)\.y\.z\b", "$1.z");
+        content = Regex.Replace(content, @"(\w+)\.y\.w\b", "$1.w");
+        content = Regex.Replace(content, @"(\w+)\.z\.w\b", "$1.w");
+
+        Debug.Log("LayaAir3D: Applied swizzle access fix (vec2/vec3/vec4 invalid swizzle patterns)");
+
+        // 1. 修复 texture2D() 调用中的 v_Texcoord0 -> v_Texcoord0.xy
+        // 匹配: texture2D(texture_name, v_Texcoord0 ...)
+        // 必须在texture2D的第二个参数位置
+        content = Regex.Replace(
+            content,
+            @"\btexture2D\s*\(\s*([^,]+),\s*v_Texcoord0(?![.\w])",
+            "texture2D($1, v_Texcoord0.xy",
+            RegexOptions.Multiline
+        );
+
+        // 2. 修复 vec2(...) + v_Texcoord0 -> vec2(...) + v_Texcoord0.xy
+        content = Regex.Replace(
+            content,
+            @"(\bvec2\s*\([^)]+\))\s*([+\-])\s*v_Texcoord0(?![.\w])",
+            "$1 $2 v_Texcoord0.xy",
+            RegexOptions.Multiline
+        );
+
+        // 3. 修复 v_Texcoord0 + (expr) -> v_Texcoord0.xy + (expr)
+        // 匹配括号表达式，如 v_Texcoord0 + (u_Time * ...)
+        content = Regex.Replace(
+            content,
+            @"v_Texcoord0(?![.\w])\s*([+\-])\s*\(",
+            "v_Texcoord0.xy $1 (",
+            RegexOptions.Multiline
+        );
+
+        // 4. 修复 v_Texcoord0 + expr（非括号） -> v_Texcoord0.xy + expr
+        // 匹配到行尾或逗号、分号等结束符
+        content = Regex.Replace(
+            content,
+            @"v_Texcoord0(?![.\w])\s*([+\-])\s*([^,;)\n]+)",
+            "v_Texcoord0.xy $1 $2",
+            RegexOptions.Multiline
+        );
+
+        // 5. 修复 texture2D 中的复杂表达式
+        // texture2D(tex, expr + v_Texcoord0) 或 texture2D(tex, v_Texcoord0 + expr)
+        // 这个规则确保texture2D的第二个参数中的v_Texcoord0都有.xy
+        var lines = content.Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i];
+
+            // 如果行中包含texture2D和v_Texcoord0（但不是v_Texcoord0.xy/.x/.y/.z/.w）
+            if (line.Contains("texture2D") &&
+                Regex.IsMatch(line, @"v_Texcoord0(?![.\w])"))
+            {
+                // 在texture2D的参数中，所有v_Texcoord0都应该是v_Texcoord0.xy
+                // 匹配texture2D的第二个参数
+                line = Regex.Replace(line,
+                    @"(texture2D\s*\([^,]+,\s*)([^)]+)",
+                    m => {
+                        string prefix = m.Groups[1].Value;
+                        string uvExpr = m.Groups[2].Value;
+                        // 在UV表达式中，替换所有裸的v_Texcoord0为v_Texcoord0.xy
+                        uvExpr = Regex.Replace(uvExpr, @"v_Texcoord0(?![.\w])", "v_Texcoord0.xy");
+                        return prefix + uvExpr;
+                    }
+                );
+                lines[i] = line;
+            }
+
+            // 处理其他包含v_Texcoord0算术运算的行
+            if (Regex.IsMatch(line, @"v_Texcoord0(?![.\w])\s*[+\-]") ||
+                Regex.IsMatch(line, @"[+\-]\s*v_Texcoord0(?![.\w])"))
+            {
+                // 检查是否是UV/坐标相关的计算（排除varying声明）
+                if (!line.Contains("varying") &&
+                    (line.Contains("texture2D") || line.Contains("UV") || line.Contains("uv") ||
+                     line.Contains("*") || line.Contains("u_Time") || line.Contains("Scroll") ||
+                     line.Contains("vec2")))
+                {
+                    // 替换所有算术运算中的v_Texcoord0
+                    line = Regex.Replace(line, @"v_Texcoord0(?![.\w])(\s*[+\-])", "v_Texcoord0.xy$1");
+                    line = Regex.Replace(line, @"([+\-]\s*)v_Texcoord0(?![.\w])", "$1v_Texcoord0.xy");
+                    lines[i] = line;
+                }
+            }
+        }
+        content = string.Join("\n", lines);
+
+        // 6. 修复嵌套的 vec2((expr + v_Texcoord0))
+        content = Regex.Replace(
+            content,
+            @"vec2\s*\(\s*\(([^)]+\s*[+\-]\s*)v_Texcoord0(?![.\w])",
+            "vec2(($1v_Texcoord0.xy",
+            RegexOptions.Multiline
+        );
+
+        // 7. 修复 texture() 函数调用为 texture2D()
+        // 在GLSL ES 2.0中，应该使用texture2D而不是texture
+        content = Regex.Replace(
+            content,
+            @"\btexture\s*\(",
+            "texture2D(",
+            RegexOptions.Multiline
+        );
+
+        // 8. 最终清理：确保没有遗漏的v_Texcoord0在运算中
+        // 再次扫描，替换任何在表达式中但没有.xy的v_Texcoord0
+        content = Regex.Replace(
+            content,
+            @"([=+\-*/,\(]\s*)v_Texcoord0(?![.\w])(?=\s*[+\-*/,\)])",
+            "$1v_Texcoord0.xy",
+            RegexOptions.Multiline
+        );
+
+        // ⭐ 9. 修复vec4到vec2的赋值问题 (CRITICAL FIX FOR TYPE MISMATCH)
+        // 检测并修复 "vec2 varName = vec4Value;" 这样的赋值
+        // 需要自动添加 .xy 使其变成 "vec2 varName = vec4Value.xy;"
+        content = FixVec4ToVec2Assignments(content);
+
+        // ⭐ 10. 修复多余的vec2()构造函数
+        // 例如: vec2(vec2_expression) -> vec2_expression
+        content = RemoveRedundantVec2Constructors(content);
+
+        // ⭐ 11. 修复函数参数类型不匹配
+        // 检测函数调用中vec4传给vec2参数的情况
+        content = FixFunctionParameterTypeMismatch(content);
+
+        // ⭐ 12. 修复texture2D返回值在vec2算术运算中的类型不匹配 (CRITICAL)
+        // 例如: vec2Var += texture2D(...) * strength
+        // texture2D返回vec4，需要添加.xy或.rg
+        content = FixTexture2DInVec2Operations(content);
+
+        Debug.Log("LayaAir3D: Applied comprehensive type mismatch fixes");
+
+        return content;
+    }
+
+    /// <summary>
+    /// 修复vec4到vec2的赋值问题
+    /// 例如: vec2 uv = v_Texcoord0; -> vec2 uv = v_Texcoord0.xy;
+    /// </summary>
+    private static string FixVec4ToVec2Assignments(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return content;
+
+        // 模式1: vec2 varName = vec4Value;
+        // 检测vec4类型的varying/uniform变量赋值给vec2
+        var vec4Variables = new HashSet<string>();
+
+        // 收集所有vec4类型的变量
+        var vec4Matches = Regex.Matches(content, @"(?:varying|uniform|attribute)\s+vec4\s+(\w+)");
+        foreach (Match match in vec4Matches)
+        {
+            vec4Variables.Add(match.Groups[1].Value);
+        }
+
+        // 也收集函数参数中的vec4
+        var funcVec4Matches = Regex.Matches(content, @"(?:in|out|inout)\s+vec4\s+(\w+)");
+        foreach (Match match in funcVec4Matches)
+        {
+            vec4Variables.Add(match.Groups[1].Value);
+        }
+
+        // 对每个vec4变量，在赋值给vec2时自动添加.xy
+        foreach (var vec4Var in vec4Variables)
+        {
+            // 模式: vec2 xxx = vec4Var;
+            content = Regex.Replace(
+                content,
+                $@"\bvec2\s+\w+\s*=\s*{vec4Var}(?![.\w])\s*;",
+                m => m.Value.Replace($"{vec4Var};", $"{vec4Var}.xy;")
+            );
+
+            // 模式: someVec2 = vec4Var;
+            content = Regex.Replace(
+                content,
+                $@"(\w+)\s*=\s*{vec4Var}(?![.\w])\s*;",
+                m => {
+                    // 检查左边的变量是否可能是vec2
+                    string lhs = m.Groups[1].Value;
+                    if (lhs.Contains("UV") || lhs.Contains("uv") || lhs.Contains("coord") || lhs.Contains("Coord"))
+                    {
+                        return m.Value.Replace($"{vec4Var};", $"{vec4Var}.xy;");
+                    }
+                    return m.Value;
+                }
+            );
+        }
+
+        return content;
+    }
+
+    /// <summary>
+    /// 移除多余的vec2()构造函数
+    /// 例如: vec2(vec2_expression) -> vec2_expression
+    /// </summary>
+    private static string RemoveRedundantVec2Constructors(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return content;
+
+        // 检测并移除 vec2(vec2(...)) 这样的嵌套
+        // 注意：只移除明显冗余的情况，保留有意义的类型转换
+
+        // 模式: vec2(something.xy) 通常是多余的
+        // 因为 .xy 已经返回 vec2 了
+        content = Regex.Replace(
+            content,
+            @"vec2\s*\(\s*(\w+\.(xy|zw))\s*\)",
+            "$1"
+        );
+
+        return content;
+    }
+
+    /// <summary>
+    /// 修复函数参数类型不匹配
+    /// 检测函数调用中vec4传给vec2参数的情况
+    /// </summary>
+    private static string FixFunctionParameterTypeMismatch(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return content;
+
+        // 收集所有vec4类型的变量
+        var vec4Variables = new HashSet<string>();
+        var vec4Matches = Regex.Matches(content, @"(?:varying|uniform|attribute)\s+vec4\s+(\w+)");
+        foreach (Match match in vec4Matches)
+        {
+            vec4Variables.Add(match.Groups[1].Value);
+        }
+
+        // 检测常见的需要vec2参数的函数
+        var vec2Functions = new[] { "texture2D", "texture", "RotateUV", "TransformUV" };
+
+        foreach (var func in vec2Functions)
+        {
+            foreach (var vec4Var in vec4Variables)
+            {
+                // 模式: function(tex, vec4Var) -> function(tex, vec4Var.xy)
+                // 第二个参数通常是UV坐标，应该是vec2
+                content = Regex.Replace(
+                    content,
+                    $@"({func}\s*\([^,]+,\s*){vec4Var}(?![.\w])",
+                    $"$1{vec4Var}.xy"
+                );
+            }
+        }
+
+        return content;
+    }
+
+    /// <summary>
+    /// 修复texture2D返回值在vec2算术运算中的类型不匹配
+    /// 例如: vec2Var += texture2D(...) * strength -> vec2Var += texture2D(...).xy * strength
+    /// </summary>
+    private static string FixTexture2DInVec2Operations(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return content;
+
+        // 收集所有vec2类型的变量
+        var vec2Variables = new HashSet<string>();
+
+        // 从声明中收集vec2变量
+        var vec2Matches = Regex.Matches(content, @"vec2\s+(\w+)");
+        foreach (Match match in vec2Matches)
+        {
+            vec2Variables.Add(match.Groups[1].Value);
+        }
+
+        // 从varying声明中收集vec2变量
+        var varyingVec2Matches = Regex.Matches(content, @"varying\s+vec2\s+(\w+)");
+        foreach (Match match in varyingVec2Matches)
+        {
+            vec2Variables.Add(match.Groups[1].Value);
+        }
+
+        Debug.Log($"LayaAir3D: Found {vec2Variables.Count} vec2 variables for texture2D fix");
+
+        // 修复每个vec2变量的texture2D赋值
+        // ⭐ 使用改进的方法：逐行处理，使用更宽松的匹配来处理嵌套括号
+        var lines = content.Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i];
+
+            foreach (var vec2Var in vec2Variables)
+            {
+                // 检测: vec2Var += texture2D(...) * 或 vec2Var = texture2D(...) *
+                // 使用宽松匹配：从texture2D开始到行尾的分号
+                if (Regex.IsMatch(line, $@"{vec2Var}\s*[+]?=\s*texture2D\s*\("))
+                {
+                    // 检查是否已经有.xy或.rg
+                    if (!Regex.IsMatch(line, @"texture2D\s*\([^;]+\)\s*\.(xy|rg)"))
+                    {
+                        // 查找texture2D调用的结束位置（找到匹配的右括号）
+                        int texture2DStart = line.IndexOf("texture2D");
+                        if (texture2DStart >= 0)
+                        {
+                            int openParen = line.IndexOf('(', texture2DStart);
+                            if (openParen >= 0)
+                            {
+                                int parenCount = 1;
+                                int closeParen = openParen + 1;
+
+                                // 找到匹配的右括号
+                                while (closeParen < line.Length && parenCount > 0)
+                                {
+                                    if (line[closeParen] == '(') parenCount++;
+                                    else if (line[closeParen] == ')') parenCount--;
+                                    closeParen++;
+                                }
+
+                                if (parenCount == 0)
+                                {
+                                    // 找到了匹配的右括号，在后面插入.xy
+                                    // 检查右括号后是否直接是.xy或.rg
+                                    if (closeParen < line.Length && line[closeParen] != '.')
+                                    {
+                                        lines[i] = line.Insert(closeParen, ".xy");
+                                        Debug.Log($"LayaAir3D: Fixed texture2D in line (with nested parens): {vec2Var} += texture2D(...).xy");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        content = string.Join("\n", lines);
+
+        Debug.Log("LayaAir3D: Applied texture2D in vec2 operations fix");
+
+        return content;
+    }
+
+    /// <summary>
+    /// 验证shader内容，检测潜在的类型不匹配问题
+    /// 这个函数不修改内容，只输出警告
+    /// </summary>
+    private static void ValidateShaderContent(string content, string shaderName)
+    {
+        if (string.IsNullOrEmpty(content))
+            return;
+
+        var issues = new List<string>();
+
+        // 检测1: 错误的swizzle访问
+        if (Regex.IsMatch(content, @"\w+\.xy\.[zw]"))
+        {
+            var matches = Regex.Matches(content, @"(\w+\.xy\.[zw])");
+            foreach (Match match in matches)
+            {
+                issues.Add($"Invalid swizzle access: {match.Value}");
+            }
+        }
+
+        if (Regex.IsMatch(content, @"\w+\.[xyzw]\.[xyzw]"))
+        {
+            var matches = Regex.Matches(content, @"(\w+\.[xyzw]\.[xyzw])");
+            foreach (Match match in matches)
+            {
+                issues.Add($"Invalid chained swizzle: {match.Value}");
+            }
+        }
+
+        // 检测2: vec4变量可能未添加.xy的情况
+        var vec4Variables = new HashSet<string>();
+        var vec4Matches = Regex.Matches(content, @"(?:varying|uniform|attribute)\s+vec4\s+(\w+)");
+        foreach (Match match in vec4Matches)
+        {
+            vec4Variables.Add(match.Groups[1].Value);
+        }
+
+        foreach (var vec4Var in vec4Variables)
+        {
+            // 检测: vec2 xxx = vec4Var; (没有.xy)
+            if (Regex.IsMatch(content, $@"vec2\s+\w+\s*=\s*{vec4Var}(?![.\w])\s*;"))
+            {
+                issues.Add($"Possible type mismatch: vec2 assignment from {vec4Var} without .xy");
+            }
+
+            // 检测: texture2D(..., vec4Var) (没有.xy)
+            if (Regex.IsMatch(content, $@"texture2D\s*\([^,]+,\s*{vec4Var}(?![.\w])\s*\)"))
+            {
+                issues.Add($"Possible type mismatch: texture2D UV parameter {vec4Var} without .xy");
+            }
+        }
+
+        // 检测3: vec2构造函数接收vec4
+        if (Regex.IsMatch(content, @"vec2\s*\(\s*vec4\s+"))
+        {
+            issues.Add("Possible issue: vec2() constructor with vec4 type");
+        }
+
+        // 检测4: texture2D在vec2算术运算中没有swizzle
+        if (Regex.IsMatch(content, @"\w+\s*\+=\s*texture2D\s*\([^)]+\)(?!\.xy)(?!\.rg)\s*\*"))
+        {
+            var matches = Regex.Matches(content, @"(\w+\s*\+=\s*texture2D\s*\([^)]+\)(?!\.xy)(?!\.rg)\s*\*[^;]+;)");
+            foreach (Match match in matches)
+            {
+                issues.Add($"Possible type mismatch: texture2D result in vec2 operation without .xy: {match.Value.Substring(0, Math.Min(60, match.Value.Length))}...");
+            }
+        }
+
+        // 输出问题
+        if (issues.Count > 0)
+        {
+            Debug.LogWarning($"LayaAir3D: Shader '{shaderName}' validation found {issues.Count} potential issue(s):");
+            foreach (var issue in issues)
+            {
+                Debug.LogWarning($"  - {issue}");
+            }
+            Debug.LogWarning("  Note: These may have been auto-fixed. Check the exported shader if compilation fails.");
+        }
+        else
+        {
+            Debug.Log($"LayaAir3D: Shader '{shaderName}' validation passed (no obvious type mismatches detected)");
+        }
+    }
+
+    /// <summary>
+    /// ⭐ 全面的类型检查和自动修复
+    /// 检测并修复所有赋值中的类型不匹配问题
+    /// </summary>
+    private static string ComprehensiveTypeCheck(string content)
+    {
+        if (string.IsNullOrEmpty(content))
+            return content;
+
+        // 第一步：收集所有变量及其类型
+        var variableTypes = new Dictionary<string, string>();
+
+        // 收集varying/uniform/attribute声明
+        var declMatches = Regex.Matches(content, @"(varying|uniform|attribute)\s+(vec2|vec3|vec4|float|int|mat2|mat3|mat4|sampler2D|samplerCube)\s+(\w+)");
+        foreach (Match match in declMatches)
+        {
+            string varType = match.Groups[2].Value;
+            string varName = match.Groups[3].Value;
+            variableTypes[varName] = varType;
+        }
+
+        // 收集局部变量声明
+        var localVarMatches = Regex.Matches(content, @"^\s*(vec2|vec3|vec4|float|int|mat2|mat3|mat4)\s+(\w+)\s*[=;]", RegexOptions.Multiline);
+        foreach (Match match in localVarMatches)
+        {
+            string varType = match.Groups[1].Value;
+            string varName = match.Groups[2].Value;
+            if (!variableTypes.ContainsKey(varName))
+            {
+                variableTypes[varName] = varType;
+            }
+        }
+
+        Debug.Log($"LayaAir3D: ComprehensiveTypeCheck - Found {variableTypes.Count} variables");
+
+        int fixCount = 0;
+
+        // 第二步：修复vec4到vec2/vec3的赋值
+        foreach (var kvp in variableTypes)
+        {
+            string varName = kvp.Key;
+            string varType = kvp.Value;
+
+            // 情况1: vec2 = vec4变量 (没有swizzle)
+            if (varType == "vec4")
+            {
+                // vec2 xxx = vec4Var;
+                var pattern1 = $@"(vec2\s+\w+\s*=\s*)({varName})(?![.\w])(\s*;)";
+                if (Regex.IsMatch(content, pattern1))
+                {
+                    content = Regex.Replace(content, pattern1, "$1$2.xy$3");
+                    fixCount++;
+                    Debug.Log($"LayaAir3D: Fixed vec2 = {varName} → vec2 = {varName}.xy");
+                }
+
+                // vec2Var = vec4Var;
+                foreach (var targetVar in variableTypes)
+                {
+                    if (targetVar.Value == "vec2")
+                    {
+                        var pattern2 = $@"({targetVar.Key}\s*=\s*)({varName})(?![.\w])(\s*;)";
+                        if (Regex.IsMatch(content, pattern2))
+                        {
+                            content = Regex.Replace(content, pattern2, "$1$2.xy$3");
+                            fixCount++;
+                            Debug.Log($"LayaAir3D: Fixed {targetVar.Key} = {varName} → {targetVar.Key} = {varName}.xy");
+                        }
+                    }
+                    else if (targetVar.Value == "vec3")
+                    {
+                        var pattern3 = $@"({targetVar.Key}\s*=\s*)({varName})(?![.\w])(\s*;)";
+                        if (Regex.IsMatch(content, pattern3))
+                        {
+                            content = Regex.Replace(content, pattern3, "$1$2.xyz$3");
+                            fixCount++;
+                            Debug.Log($"LayaAir3D: Fixed {targetVar.Key} = {varName} → {targetVar.Key} = {varName}.xyz");
+                        }
+                    }
+                }
+            }
+
+            // 情况2: vec3 = vec4变量
+            if (varType == "vec4")
+            {
+                // vec3 xxx = vec4Var;
+                var pattern4 = $@"(vec3\s+\w+\s*=\s*)({varName})(?![.\w])(\s*;)";
+                if (Regex.IsMatch(content, pattern4))
+                {
+                    content = Regex.Replace(content, pattern4, "$1$2.xyz$3");
+                    fixCount++;
+                    Debug.Log($"LayaAir3D: Fixed vec3 = {varName} → vec3 = {varName}.xyz");
+                }
+            }
+
+            // 情况3: vec3 = vec2变量 (需要扩展)
+            if (varType == "vec2")
+            {
+                foreach (var targetVar in variableTypes)
+                {
+                    if (targetVar.Value == "vec3")
+                    {
+                        var pattern5 = $@"({targetVar.Key}\s*=\s*)({varName})(?![.\w])(\s*;)";
+                        if (Regex.IsMatch(content, pattern5))
+                        {
+                            // vec3不能直接从vec2转换，需要用户手动修复，这里只记录
+                            Debug.LogWarning($"LayaAir3D: Type mismatch detected: {targetVar.Key} (vec3) = {varName} (vec2) - Manual fix may be needed");
+                        }
+                    }
+                    else if (targetVar.Value == "vec4")
+                    {
+                        var pattern6 = $@"({targetVar.Key}\s*=\s*)({varName})(?![.\w])(\s*;)";
+                        if (Regex.IsMatch(content, pattern6))
+                        {
+                            // vec4不能直接从vec2转换，需要用户手动修复
+                            Debug.LogWarning($"LayaAir3D: Type mismatch detected: {targetVar.Key} (vec4) = {varName} (vec2) - Manual fix may be needed");
+                        }
+                    }
+                }
+            }
+        }
+
+        // 第三步：修复texture2D作为UV参数（应该是vec2）
+        foreach (var kvp in variableTypes)
+        {
+            if (kvp.Value == "vec4")
+            {
+                // texture2D(sampler, vec4Var) → texture2D(sampler, vec4Var.xy)
+                var pattern7 = $@"(texture2D\s*\([^,]+,\s*)({kvp.Key})(?![.\w])(\s*\))";
+                if (Regex.IsMatch(content, pattern7))
+                {
+                    content = Regex.Replace(content, pattern7, "$1$2.xy$3");
+                    fixCount++;
+                    Debug.Log($"LayaAir3D: Fixed texture2D UV parameter: {kvp.Key} → {kvp.Key}.xy");
+                }
+            }
+        }
+
+        // 第四步：修复函数参数中的类型不匹配
+        // 常见函数签名：fract(vec2), mix(vec3, vec3, float), etc.
+        var commonVec2Functions = new[] { "fract", "floor", "ceil", "abs", "normalize", "length" };
+        foreach (var func in commonVec2Functions)
+        {
+            foreach (var kvp in variableTypes)
+            {
+                if (kvp.Value == "vec4")
+                {
+                    // func(vec4Var) where func expects vec2
+                    var pattern8 = $@"({func}\s*\()({kvp.Key})(?![.\w])(\s*\))";
+                    var matches = Regex.Matches(content, pattern8);
+                    if (matches.Count > 0)
+                    {
+                        // 这个需要上下文判断，先记录
+                        Debug.LogWarning($"LayaAir3D: Potential type mismatch in {func}({kvp.Key}) - vec4 may need swizzle");
+                    }
+                }
+            }
+        }
+
+        // 第五步：修复构造函数中的类型不匹配
+        // vec2(vec4Var) → vec2(vec4Var.xy)
+        foreach (var kvp in variableTypes)
+        {
+            if (kvp.Value == "vec4")
+            {
+                var pattern9 = $@"(vec2\s*\()({kvp.Key})(?![.\w])(\s*\))";
+                if (Regex.IsMatch(content, pattern9))
+                {
+                    content = Regex.Replace(content, pattern9, "$1$2.xy$3");
+                    fixCount++;
+                    Debug.Log($"LayaAir3D: Fixed vec2 constructor: vec2({kvp.Key}) → vec2({kvp.Key}.xy)");
+                }
+
+                var pattern10 = $@"(vec3\s*\()({kvp.Key})(?![.\w])(\s*\))";
+                if (Regex.IsMatch(content, pattern10))
+                {
+                    content = Regex.Replace(content, pattern10, "$1$2.xyz$3");
+                    fixCount++;
+                    Debug.Log($"LayaAir3D: Fixed vec3 constructor: vec3({kvp.Key}) → vec3({kvp.Key}.xyz)");
+                }
+            }
+            else if (kvp.Value == "vec3")
+            {
+                var pattern11 = $@"(vec2\s*\()({kvp.Key})(?![.\w])(\s*\))";
+                if (Regex.IsMatch(content, pattern11))
+                {
+                    content = Regex.Replace(content, pattern11, "$1$2.xy$3");
+                    fixCount++;
+                    Debug.Log($"LayaAir3D: Fixed vec2 constructor: vec2({kvp.Key}) → vec2({kvp.Key}.xy)");
+                }
+            }
+        }
+
+        // 第六步：修复texture2D在复杂表达式中的类型不匹配
+        // 模式: vec2Var += texture2D(...) * scalar (没有.xy)
+        // 这个比FixTexture2DInVec2Operations更强大，能处理复杂的嵌套括号
+        var vec2Vars = variableTypes.Where(kvp => kvp.Value == "vec2").Select(kvp => kvp.Key).ToList();
+
+        foreach (var vec2Var in vec2Vars)
+        {
+            // 使用更宽松的正则，匹配texture2D(...) * 但没有.xy/.rg的情况
+            // 查找: vec2Var += texture2D(任意内容) * 任意内容;
+            // 确保texture2D后面不是 .xy 或 .rg
+            var pattern12 = $@"({vec2Var}\s*\+=\s*texture2D\s*\([^;]*?\))(?!\.xy)(?!\.rg)(\s*\*\s*[^;]+;)";
+            var matches = Regex.Matches(content, pattern12);
+
+            if (matches.Count > 0)
+            {
+                foreach (Match match in matches)
+                {
+                    string original = match.Value;
+                    // 在texture2D的右括号后插入.xy
+                    string fixed_str = match.Groups[1].Value + ".xy" + match.Groups[2].Value;
+                    content = content.Replace(original, fixed_str);
+                    fixCount++;
+                    Debug.Log($"LayaAir3D: Fixed texture2D in complex expression: {vec2Var} += texture2D(...).xy * ...");
+                }
+            }
+
+            // 同样处理 = 赋值
+            var pattern13 = $@"({vec2Var}\s*=\s*texture2D\s*\([^;]*?\))(?!\.xy)(?!\.rg)(\s*\*\s*[^;]+;)";
+            matches = Regex.Matches(content, pattern13);
+
+            if (matches.Count > 0)
+            {
+                foreach (Match match in matches)
+                {
+                    string original = match.Value;
+                    string fixed_str = match.Groups[1].Value + ".xy" + match.Groups[2].Value;
+                    content = content.Replace(original, fixed_str);
+                    fixCount++;
+                    Debug.Log($"LayaAir3D: Fixed texture2D in complex expression: {vec2Var} = texture2D(...).xy * ...");
+                }
+            }
+        }
+
+        // 第七步：检测可疑的变量名使用
+        // 如果v_ScreenPos存在，但代码中使用了v_Texcoord5.xy / v_Texcoord5.w的模式，可能是错误
+        if (variableTypes.ContainsKey("v_ScreenPos") && variableTypes.ContainsKey("v_Texcoord5"))
+        {
+            // 检测: xxx = v_Texcoord5.xy / v_Texcoord5.w
+            if (Regex.IsMatch(content, @"\w+\s*=\s*v_Texcoord5\.xy\s*/\s*v_Texcoord5\.w"))
+            {
+                Debug.LogWarning($"LayaAir3D: Suspicious pattern detected: 'v_Texcoord5.xy / v_Texcoord5.w' - Should this be 'v_ScreenPos.xy / v_ScreenPos.w'?");
+
+                // 自动修复：如果是计算screenUV的模式，替换为v_ScreenPos
+                var pattern14 = @"(vec2\s+screenUV\s*=\s*)v_Texcoord5(\.xy\s*/\s*)v_Texcoord5(\.w\s*;)";
+                if (Regex.IsMatch(content, pattern14))
+                {
+                    content = Regex.Replace(content, pattern14, "$1v_ScreenPos$2v_ScreenPos$3");
+                    fixCount++;
+                    Debug.Log($"LayaAir3D: Fixed screenUV calculation: v_Texcoord5 → v_ScreenPos");
+                }
+            }
+        }
+
+        if (fixCount > 0)
+        {
+            Debug.Log($"LayaAir3D: ComprehensiveTypeCheck applied {fixCount} automatic type fixes");
+        }
+        else
+        {
+            Debug.Log($"LayaAir3D: ComprehensiveTypeCheck - No type fixes needed");
+        }
+
+        return content;
+    }
+
+    enum ShaderPartType { Header, Shader3D, GLSL }
+
+    class ShaderPart
+    {
+        public ShaderPartType type;
+        public string content;
+    }
+
+    /// <summary>
+    /// 分离shader为不同的部分
+    /// </summary>
+    private static List<ShaderPart> SplitShaderIntoParts(string content)
+    {
+        var parts = new List<ShaderPart>();
+        var lines = content.Split('\n');
+        var currentPart = new StringBuilder();
+        ShaderPartType currentType = ShaderPartType.Header;
+
+        foreach (var line in lines)
+        {
+            string trimmed = line.Trim();
+
+            if (trimmed == "Shader3D Start")
+            {
+                if (currentPart.Length > 0)
+                {
+                    parts.Add(new ShaderPart { type = currentType, content = currentPart.ToString().Trim() });
+                    currentPart.Clear();
+                }
+                currentType = ShaderPartType.Shader3D;
+                currentPart.AppendLine(line);
+            }
+            else if (trimmed == "Shader3D End")
+            {
+                currentPart.AppendLine(line);
+                parts.Add(new ShaderPart { type = currentType, content = currentPart.ToString().Trim() });
+                currentPart.Clear();
+                currentType = ShaderPartType.Header;
+            }
+            else if (trimmed == "GLSL Start")
+            {
+                if (currentPart.Length > 0)
+                {
+                    parts.Add(new ShaderPart { type = currentType, content = currentPart.ToString().Trim() });
+                    currentPart.Clear();
+                }
+                currentType = ShaderPartType.GLSL;
+                currentPart.AppendLine(line);
+            }
+            else if (trimmed == "GLSL End")
+            {
+                currentPart.AppendLine(line);
+                parts.Add(new ShaderPart { type = currentType, content = currentPart.ToString().Trim() });
+                currentPart.Clear();
+                currentType = ShaderPartType.Header;
+            }
+            else
+            {
+                currentPart.AppendLine(line);
+            }
+        }
+
+        if (currentPart.Length > 0)
+        {
+            parts.Add(new ShaderPart { type = currentType, content = currentPart.ToString().Trim() });
+        }
+
+        return parts;
+    }
+
+    /// <summary>
+    /// 格式化Shader3D配置块
+    /// </summary>
+    private static string FormatShader3DBlock(string content)
+    {
+        var lines = content.Split('\n');
+        var result = new StringBuilder();
+        int indentLevel = 0;
+
+        foreach (var line in lines)
+        {
+            string trimmed = line.Trim();
+
+            if (string.IsNullOrWhiteSpace(trimmed))
+                continue;
+
+            if (trimmed == "Shader3D Start" || trimmed == "Shader3D End")
+            {
+                result.AppendLine(trimmed);
+            }
+            else if (trimmed == "{")
+            {
+                result.AppendLine(trimmed);
+                indentLevel++;
+            }
+            else if (trimmed == "}" || trimmed == "},")
+            {
+                indentLevel = Math.Max(0, indentLevel - 1); // 确保不会变成负数
+                result.AppendLine(new string(' ', indentLevel * 4) + trimmed);
+            }
+            else
+            {
+                result.AppendLine(new string(' ', Math.Max(0, indentLevel) * 4) + trimmed); // 确保不会变成负数
+            }
+        }
+
+        return result.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// 格式化GLSL代码块
+    /// </summary>
+    private static string FormatGLSLBlock(string content)
+    {
+        var lines = content.Split('\n');
+        var result = new StringBuilder();
+        int indentLevel = 0;
+        string previousLine = "";
+        bool needsBlankLine = false;
+
+        foreach (var line in lines)
+        {
+            string trimmed = line.Trim();
+
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                // 保留空行，但不连续
+                if (!string.IsNullOrWhiteSpace(previousLine))
+                {
+                    result.AppendLine();
+                    previousLine = "";
+                }
+                continue;
+            }
+
+            // GLSL Start/End 顶格
+            if (trimmed == "GLSL Start" || trimmed == "GLSL End")
+            {
+                if (needsBlankLine && result.Length > 0)
+                    result.AppendLine();
+                result.AppendLine(trimmed);
+                previousLine = trimmed;
+                needsBlankLine = false;
+                continue;
+            }
+
+            // 预处理指令顶格
+            if (trimmed.StartsWith("#"))
+            {
+                // 在#define SHADER_NAME之前加空行（新函数开始）
+                if (trimmed.StartsWith("#define SHADER_NAME") && !string.IsNullOrWhiteSpace(previousLine))
+                {
+                    result.AppendLine();
+                }
+                result.AppendLine(trimmed);
+                previousLine = trimmed;
+                needsBlankLine = false;
+                continue;
+            }
+
+            // 计算缩进
+            if (trimmed.EndsWith("{"))
+            {
+                result.AppendLine(new string(' ', Math.Max(0, indentLevel) * 4) + trimmed);
+                indentLevel++;
+                needsBlankLine = false;
+            }
+            else if (trimmed.StartsWith("}"))
+            {
+                indentLevel = Math.Max(0, indentLevel - 1); // 确保不会变成负数
+                result.AppendLine(new string(' ', indentLevel * 4) + trimmed);
+                needsBlankLine = true; // 函数结束后需要空行
+            }
+            else
+            {
+                result.AppendLine(new string(' ', Math.Max(0, indentLevel) * 4) + trimmed);
+                needsBlankLine = false;
+            }
+
+            previousLine = trimmed;
+        }
+
+        return result.ToString().TrimEnd();
     }
     
     /// <summary>
@@ -2991,6 +6809,32 @@ internal class CustomShaderExporter
             name += "MAP";
         }
         return name;
+    }
+
+    /// <summary>
+    /// 将Unity Keyword转换为Laya Define
+    /// 规则：去掉前缀 _ 和后缀 _ON
+    /// 示例：_LAYERTYPE_THREE → LAYERTYPE_THREE, _USEDISTORT0_ON → USEDISTORT0
+    /// </summary>
+    private static string ConvertKeywordToDefine(string unityKeyword)
+    {
+        if (string.IsNullOrEmpty(unityKeyword))
+            return null;
+
+        // 去掉前缀 _
+        string define = unityKeyword.TrimStart('_');
+
+        // 去掉后缀 _ON（如果有）
+        if (define.EndsWith("_ON"))
+        {
+            define = define.Substring(0, define.Length - 3);
+        }
+
+        // 如果结果为空，返回null
+        if (string.IsNullOrEmpty(define))
+            return null;
+
+        return define;
     }
 
     /// <summary>
@@ -3210,46 +7054,66 @@ internal class CustomShaderExporter
     /// <summary>
     /// 根据Shader名称和属性进一步确定自定义Shader的ShaderType
     /// 用于Custom类型的Shader
+    ///
+    /// ⭐ 重要：只有真正的粒子系统shader才应该使用LayaShaderType.Effect
+    /// Mesh特效shader（虽然名称包含effect但用于MeshRenderer）应该使用LayaShaderType.D3
     /// </summary>
     private static LayaShaderType DetectCustomShaderType(string shaderName, List<ShaderProperty> properties)
     {
         string lowerName = shaderName.ToLower();
-        
-        // 检测是否是特效类Shader（用于MeshRenderer的特效，不是粒子）
-        // 这些Shader通常用于特效网格，应该使用Effect类型
-        if (lowerName.Contains("effect") || 
-            lowerName.Contains("fx") ||
-            lowerName.Contains("vfx") ||
-            lowerName.Contains("additive"))
+
+        // ⭐ 修复：只有真正的粒子系统shader才使用Effect类型
+        // Mesh特效shader虽然名称包含"effect"，但应该使用D3类型
+        // 注意：这里只做初步判断，最终由IsParticleShader确认
+        bool mightBeParticle = lowerName.Contains("particle") ||  // 明确的粒子关键字
+                               lowerName.Contains("shurike") ||   // 粒子系统名称
+                               lowerName.Contains("trail");        // 拖尾粒子
+
+        // 如果可能是粒子，返回Effect类型
+        // 但最终是否使用粒子attributeMap由IsParticleShader决定
+        if (mightBeParticle)
         {
             return LayaShaderType.Effect;
         }
-        
+
+        // ⭐ Mesh特效shader（包含effect/fx/vfx/additive但不是粒子系统）使用D3类型
+        // 例如：BR_Effect_Mask_Additive, Effect_Basic_Additive等
+        // 这些shader用于MeshRenderer，应该使用标准的Mesh attributeMap
+        if (lowerName.Contains("effect") ||
+            lowerName.Contains("fx") ||
+            lowerName.Contains("vfx") ||
+            lowerName.Contains("additive") ||
+            lowerName.Contains("_add"))
+        {
+            Debug.Log($"LayaAir3D: Detected Mesh Effect shader (not particle): {shaderName} -> ShaderType: D3");
+            return LayaShaderType.D3;  // ⭐ 使用D3而不是Effect
+        }
+
         // 检测是否是后处理Shader
-        if (lowerName.Contains("postprocess") || 
+        if (lowerName.Contains("postprocess") ||
             lowerName.Contains("post process") ||
-            lowerName.Contains("bloom") || 
+            lowerName.Contains("bloom") ||
             lowerName.Contains("blur") ||
-            lowerName.Contains("tonemapping") || 
+            lowerName.Contains("tonemapping") ||
             lowerName.Contains("colorgrading") ||
-            lowerName.Contains("vignette") || 
+            lowerName.Contains("vignette") ||
             lowerName.Contains("dof") ||
-            lowerName.Contains("depth of field") || 
+            lowerName.Contains("depth of field") ||
             lowerName.Contains("ssao") ||
             lowerName.Contains("screen space"))
         {
             return LayaShaderType.PostProcess;
         }
-        
+
         // 检测是否是2D Shader
-        if (lowerName.Contains("2d") || 
+        if (lowerName.Contains("2d") ||
             lowerName.Contains("sprite") ||
-            lowerName.Contains("ui") || 
+            lowerName.Contains("ui") ||
             lowerName.Contains("canvas"))
         {
             return LayaShaderType.D2_BaseRenderNode2D;
         }
-        
+
         // 默认为3D Shader
         return LayaShaderType.D3;
     }
@@ -3293,12 +7157,40 @@ internal class CustomShaderExporter
     /// <param name="shaderName">LayaAir Shader名称（转换后的）</param>
     /// <param name="properties">Shader属性列表</param>
     /// <param name="unityShaderName">Unity原始Shader名称（用于类型检测）</param>
-    private static string GenerateShaderFileContent(string shaderName, List<ShaderProperty> properties, string unityShaderName = null)
+    /// <param name="materialFile">材质文件（用于检测实际使用的渲染器类型）</param>
+    private static string GenerateShaderFileContent(string shaderName, List<ShaderProperty> properties, string unityShaderName = null, MaterialFile materialFile = null)
     {
         // 检测材质类型
         string shaderNameForDetection = unityShaderName ?? shaderName;
         LayaMaterialType materialType = DetectMaterialType(shaderNameForDetection);
-        LayaShaderType shaderType = GetShaderTypeFromMaterialType(materialType);
+
+        // 如果有MaterialFile，根据实际使用的渲染器类型来决定shader类型
+        LayaShaderType shaderType;
+        if (materialFile != null)
+        {
+            bool isParticle = materialFile.IsUsedByParticleSystem();
+            bool isMesh = materialFile.IsUsedByMeshRenderer();
+
+            if (isParticle && !isMesh)
+            {
+                shaderType = LayaShaderType.Effect;
+                Debug.Log($"LayaAir3D: Using Effect shader type (used by ParticleSystemRenderer): {shaderName}");
+            }
+            else if (isMesh && !isParticle)
+            {
+                shaderType = LayaShaderType.D3;
+                Debug.Log($"LayaAir3D: Using D3 shader type (used by MeshRenderer): {shaderName}");
+            }
+            else
+            {
+                // Fallback to material type detection
+                shaderType = GetShaderTypeFromMaterialType(materialType);
+            }
+        }
+        else
+        {
+            shaderType = GetShaderTypeFromMaterialType(materialType);
+        }
         
         // 对于Custom类型，进一步检测ShaderType
         if (materialType == LayaMaterialType.Custom)
@@ -3361,9 +7253,12 @@ internal class CustomShaderExporter
         sb.AppendLine("        // Basic");
         sb.AppendLine("        u_AlphaTestValue: { type: Float, default: 0.5, range: [0.0, 1.0] },");
         sb.AppendLine("        u_TilingOffset: { type: Vector4, default: [1, 1, 0, 0] },");
-        sb.AppendLine("        u_Time: { type: Vector4, default: [0, 0, 0, 0] },");
-        
-        HashSet<string> addedProps = new HashSet<string> { "u_AlphaTestValue", "u_TilingOffset", "u_Time" };
+        // ⭐ 修复：移除u_Time定义（u_Time是引擎内置uniform，不需要在shader中定义）
+        // sb.AppendLine("        u_Time: { type: Vector4, default: [0, 0, 0, 0] },");
+        sb.AppendLine("        u_AlbedoColor: { type: Color, default: [1, 1, 1, 1] },");
+        sb.AppendLine("        u_AlbedoIntensity: { type: Float, default: 1.0, range: [0.0, 4.0] },");
+
+        HashSet<string> addedProps = new HashSet<string> { "u_AlphaTestValue", "u_TilingOffset", "u_AlbedoColor", "u_AlbedoIntensity" };
         
         // 添加所有属性
         sb.AppendLine();
@@ -3470,17 +7365,80 @@ internal class CustomShaderExporter
         sb.AppendLine("    supportReflectionProbe:false,");
         sb.AppendLine($"    shaderType:{shaderTypeStr},");
         
-        // uniformMap - 粒子系统的uniforms（参考Particle.shader模板）
+        // uniformMap - 从Unity Shader属性生成（使用properties参数）
         sb.AppendLine("    uniformMap:{");
-        sb.AppendLine("        u_Tintcolor: { type: Color, default: [1, 1, 1, 1] },");
-        sb.AppendLine("        u_texture: { type: Texture2D, default: \"white\", options: { define: \"DIFFUSEMAP\" } },");
-        sb.AppendLine("        u_TilingOffset: { type: Vector4, default: [1, 1, 1, 1] },");
+
+        // 添加基础粒子系统uniforms
+        sb.AppendLine("        u_AlphaTestValue: { type: Float, default: 0.5, range: [0.0, 1.0] },");
+        sb.AppendLine("        u_TilingOffset: { type: Vector4, default: [1, 1, 0, 0] },");
+
+        // 从properties列表生成完整的uniformMap
+        if (properties != null && properties.Count > 0)
+        {
+            foreach (var prop in properties)
+            {
+                string uniformLine = GenerateUniformLine(prop);
+                if (!string.IsNullOrEmpty(uniformLine))
+                {
+                    sb.AppendLine(uniformLine);
+                }
+
+                // 为纹理属性生成_ST变量（Tiling/Offset）
+                if (prop.type == ShaderUtil.ShaderPropertyType.TexEnv && !prop.layaName.EndsWith("_ST"))
+                {
+                    string stName = $"{prop.layaName}_ST";
+                    sb.AppendLine($"        {stName}: {{ type: Vector4, default: [1, 1, 0, 0] }},");
+                }
+            }
+        }
+        else
+        {
+            // 如果没有properties，使用最小配置
+            sb.AppendLine("        u_Tintcolor: { type: Color, default: [1, 1, 1, 1] },");
+            sb.AppendLine("        u_texture: { type: Texture2D, default: \"white\", options: { define: \"DIFFUSEMAP\" } },");
+        }
+
         sb.AppendLine("    },");
-        
-        // defines - 粒子系统的defines（参考Particle.shader模板）
+
+        // defines - 从properties生成（纹理defines + 特性开关）
         sb.AppendLine("    defines: {");
+        sb.AppendLine("        RENDERMODE_MESH: { type: bool, default: false },");
         sb.AppendLine("        TINTCOLOR: { type: bool, default: true },");
         sb.AppendLine("        ADDTIVEFOG: { type: bool, default: true },");
+
+        // 从properties生成defines
+        if (properties != null && properties.Count > 0)
+        {
+            // 收集所有texture的defines
+            HashSet<string> addedDefines = new HashSet<string>();
+
+            foreach (var prop in properties)
+            {
+                if (prop.type == ShaderUtil.ShaderPropertyType.TexEnv && !string.IsNullOrEmpty(prop.define))
+                {
+                    if (!addedDefines.Contains(prop.define))
+                    {
+                        sb.AppendLine($"        {prop.define}: {{ type: bool, default: false }},");
+                        addedDefines.Add(prop.define);
+                    }
+                }
+
+                // 为Use/Enable开头的Float属性生成define
+                string lowerName = prop.unityName.ToLower();
+                if ((lowerName.StartsWith("use") || lowerName.StartsWith("_use")) &&
+                    (prop.type == ShaderUtil.ShaderPropertyType.Float || prop.type == ShaderUtil.ShaderPropertyType.Range))
+                {
+                    // 例如: _UseDissolve -> USEDISSOLVE
+                    string defineName = prop.unityName.TrimStart('_').ToUpper();
+                    if (!addedDefines.Contains(defineName))
+                    {
+                        sb.AppendLine($"        {defineName}: {{ type: bool, default: false }},");
+                        addedDefines.Add(defineName);
+                    }
+                }
+            }
+        }
+
         sb.AppendLine("    },");
         
         // attributeMap - 粒子系统的顶点属性（参考Particle.shader模板）
@@ -3531,6 +7489,7 @@ internal class CustomShaderExporter
 
     /// <summary>
     /// 生成粒子片元着色器（参考Particle.shader模板）
+    /// 使用 ParticleShaderTemplate 提供完整的粒子颜色空间支持
     /// </summary>
     private static void GenerateParticleFragmentShader(StringBuilder sb, string shaderName)
     {
@@ -3542,28 +7501,32 @@ internal class CustomShaderExporter
         sb.AppendLine("#include \"Scene.glsl\";");
         sb.AppendLine("#include \"SceneFog.glsl\";");
         sb.AppendLine("#include \"Color.glsl\";");
+        sb.AppendLine("#include \"Camera.glsl\";");
         sb.AppendLine();
-        
-        // 常量（参考Particle.shader模板）
-        sb.AppendLine("const vec4 c_ColorSpace = vec4(4.59479380, 4.59479380, 4.59479380, 2.0);");
-        sb.AppendLine();
-        
-        // varying声明（与VS保持一致）
-        sb.AppendLine("varying vec4 v_Color;");
-        sb.AppendLine("varying vec2 v_TextureCoordinate;");
-        sb.AppendLine();
+
+        // varying声明（与VS保持一致，参考AI版本使用条件编译）
         sb.AppendLine("#ifdef RENDERMODE_MESH");
         sb.AppendLine("varying vec4 v_MeshColor;");
         sb.AppendLine("#endif");
+        sb.AppendLine("varying vec4 v_Color;");
+        sb.AppendLine("varying vec2 v_TextureCoordinate;");
+        sb.AppendLine("varying vec4 v_ScreenPos;");
         sb.AppendLine();
-        
-        // main函数（参考Particle.shader模板）
+
+        // ========== 粒子颜色空间常量（来自ParticleShaderTemplate） ==========
+        sb.AppendLine(ParticleShaderTemplate.GetParticleFragmentConstants());
+        sb.AppendLine();
+
+        // main函数（参考引擎标准粒子shader模板）
         sb.AppendLine("void main()");
         sb.AppendLine("{");
         sb.AppendLine("    vec4 color;");
+        sb.AppendLine();
         sb.AppendLine("#ifdef RENDERMODE_MESH");
+        sb.AppendLine("    // Mesh mode: start with mesh vertex color");
         sb.AppendLine("    color = v_MeshColor;");
         sb.AppendLine("#else");
+        sb.AppendLine("    // Billboard mode: start with white");
         sb.AppendLine("    color = vec4(1.0);");
         sb.AppendLine("#endif");
         sb.AppendLine();
@@ -3572,23 +7535,31 @@ internal class CustomShaderExporter
         sb.AppendLine("    #ifdef Gamma_u_texture");
         sb.AppendLine("    colorT = gammaToLinear(colorT);");
         sb.AppendLine("    #endif");
-        sb.AppendLine("    #ifdef TINTCOLOR");
-        sb.AppendLine("    color *= colorT * u_Tintcolor * c_ColorSpace * v_Color;");
-        sb.AppendLine("    #else");
-        sb.AppendLine("    color *= colorT * v_Color;");
-        sb.AppendLine("    #endif");
-        sb.AppendLine("#else");
-        sb.AppendLine("    #ifdef TINTCOLOR");
+        sb.AppendLine("    color *= colorT;");
+        sb.AppendLine("#endif");
+        sb.AppendLine();
+        // 注意：不要在这里再次乘以v_MeshColor，因为已经在初始化时设置了（6659-6665行）
+        // 如果在这里再乘，会导致v_MeshColor^2，颜色变暗
+        sb.AppendLine("#ifdef TINTCOLOR");
         sb.AppendLine("    color *= u_Tintcolor * c_ColorSpace * v_Color;");
-        sb.AppendLine("    #else");
+        sb.AppendLine("#else");
         sb.AppendLine("    color *= v_Color;");
-        sb.AppendLine("    #endif");
         sb.AppendLine("#endif");
         sb.AppendLine();
         sb.AppendLine("#ifdef ALPHATEST");
         sb.AppendLine("    if (color.a < u_AlphaTestValue)");
         sb.AppendLine("    {");
         sb.AppendLine("        discard;");
+        sb.AppendLine("    }");
+        sb.AppendLine("#endif");
+        sb.AppendLine();
+        sb.AppendLine("    gl_FragColor = color;");
+        sb.AppendLine();
+        sb.AppendLine("#ifdef FOG");
+        sb.AppendLine("    gl_FragColor.rgb = scenUnlitFog(gl_FragColor.rgb);");
+        sb.AppendLine("#endif");
+        sb.AppendLine();
+        sb.AppendLine("    gl_FragColor = outputTransform(gl_FragColor);");
         sb.AppendLine("}");
         sb.AppendLine();
         sb.AppendLine("#endGLSL");
@@ -3598,6 +7569,7 @@ internal class CustomShaderExporter
     /// <summary>
     /// 生成粒子Billboard顶点着色器（参考Particle.shader模板）
     /// 粒子系统不使用Vertex结构体，直接使用粒子attribute计算位置
+    /// 使用 ParticleShaderTemplate 提供80%+ Unity兼容性
     /// </summary>
     private static void GenerateParticleBillboardVertexShader(StringBuilder sb, string shaderName)
     {
@@ -3614,92 +7586,22 @@ internal class CustomShaderExporter
         sb.AppendLine("#include \"Scene.glsl\";");
         sb.AppendLine("#include \"SceneFogInput.glsl\";");
         sb.AppendLine();
-        
-        // varying声明（参考Particle.shader模板）
+
+        // varying声明（参考AI版本使用条件编译）
         sb.AppendLine("#ifdef RENDERMODE_MESH");
         sb.AppendLine("varying vec4 v_MeshColor;");
         sb.AppendLine("#endif");
-        sb.AppendLine();
         sb.AppendLine("varying vec4 v_Color;");
         sb.AppendLine("varying vec2 v_TextureCoordinate;");
+        sb.AppendLine("varying vec4 v_ScreenPos;");
         sb.AppendLine();
-        
-        // UV变换函数
-        sb.AppendLine("vec2 TransformUV(vec2 texcoord, vec4 tilingOffset)");
-        sb.AppendLine("{");
-        sb.AppendLine("    vec2 transTexcoord = vec2(texcoord.x, texcoord.y - 1.0) * tilingOffset.xy + vec2(tilingOffset.z, -tilingOffset.w);");
-        sb.AppendLine("    transTexcoord.y += 1.0;");
-        sb.AppendLine("    return transTexcoord;");
-        sb.AppendLine("}");
-        sb.AppendLine();
-        
-        // main函数（简化版，参考Particle.shader模板结构）
-        sb.AppendLine("void main()");
-        sb.AppendLine("{");
-        sb.AppendLine("    float age = u_CurrentTime - a_DirectionTime.w;");
-        sb.AppendLine("    float normalizedAge = age / a_ShapePositionStartLifeTime.w;");
-        sb.AppendLine("    vec3 lifeVelocity = vec3(0.0);");
-        sb.AppendLine("    if (normalizedAge < 1.0)");
-        sb.AppendLine("    {");
-        sb.AppendLine("        vec3 startVelocity = a_DirectionTime.xyz * a_StartSpeed;");
-        sb.AppendLine("        vec3 gravityVelocity = u_Gravity * age;");
-        sb.AppendLine();
-        sb.AppendLine("        vec4 worldRotation;");
-        sb.AppendLine("        if (u_SimulationSpace == 0)");
-        sb.AppendLine("            worldRotation = a_SimulationWorldRotation;");
-        sb.AppendLine("        else");
-        sb.AppendLine("            worldRotation = u_WorldRotation;");
-        sb.AppendLine();
-        sb.AppendLine("        // drag");
-        sb.AppendLine("        vec3 dragData = a_DirectionTime.xyz * mix(u_DragConstanct.x, u_DragConstanct.y, a_Random0.x);");
-        sb.AppendLine("        // 计算粒子位置");
-        sb.AppendLine("        vec3 center = computeParticlePosition(startVelocity, lifeVelocity, age, normalizedAge, gravityVelocity, worldRotation, dragData);");
-        sb.AppendLine();
-        sb.AppendLine("#ifdef SPHERHBILLBOARD");
-        sb.AppendLine("        vec2 corner = a_CornerTextureCoordinate.xy;");
-        sb.AppendLine("        vec3 cameraUpVector = normalize(u_CameraUp);");
-        sb.AppendLine("        vec3 sideVector = normalize(cross(u_CameraDirection, cameraUpVector));");
-        sb.AppendLine("        vec3 upVector = normalize(cross(sideVector, u_CameraDirection));");
-        sb.AppendLine("        corner *= computeParticleSizeBillbard(a_StartSize.xy, normalizedAge);");
-        sb.AppendLine("        float c = cos(a_StartRotation0.x);");
-        sb.AppendLine("        float s = sin(a_StartRotation0.x);");
-        sb.AppendLine("        mat2 rotation = mat2(c, -s, s, c);");
-        sb.AppendLine("        corner = rotation * corner;");
-        sb.AppendLine("        center += u_SizeScale.xzy * (corner.x * sideVector + corner.y * upVector);");
-        sb.AppendLine("#endif");
-        sb.AppendLine();
-        sb.AppendLine("#ifdef RENDERMODE_MESH");
-        sb.AppendLine("        vec3 size = computeParticleSizeMesh(a_StartSize, normalizedAge);");
-        sb.AppendLine("        center += rotationByQuaternions(u_SizeScale * a_MeshPosition * size, worldRotation);");
-        sb.AppendLine("        v_MeshColor = a_MeshColor;");
-        sb.AppendLine("#endif");
-        sb.AppendLine();
-        sb.AppendLine("        gl_Position = u_Projection * u_View * vec4(center, 1.0);");
-        sb.AppendLine("        vec4 startcolor = gammaToLinear(a_StartColor);");
-        sb.AppendLine("        v_Color = computeParticleColor(startcolor, normalizedAge);");
-        sb.AppendLine();
-        sb.AppendLine("#ifdef DIFFUSEMAP");
-        sb.AppendLine("        vec2 simulateUV;");
-        sb.AppendLine("    #if defined(SPHERHBILLBOARD) || defined(STRETCHEDBILLBOARD) || defined(HORIZONTALBILLBOARD) || defined(VERTICALBILLBOARD)");
-        sb.AppendLine("        simulateUV = a_SimulationUV.xy + a_CornerTextureCoordinate.zw * a_SimulationUV.zw;");
-        sb.AppendLine("        v_TextureCoordinate = computeParticleUV(simulateUV, normalizedAge);");
-        sb.AppendLine("    #endif");
-        sb.AppendLine("    #ifdef RENDERMODE_MESH");
-        sb.AppendLine("        simulateUV = a_SimulationUV.xy + a_MeshTextureCoordinate * a_SimulationUV.zw;");
-        sb.AppendLine("        v_TextureCoordinate = computeParticleUV(simulateUV, normalizedAge);");
-        sb.AppendLine("    #endif");
-        sb.AppendLine("        v_TextureCoordinate = TransformUV(v_TextureCoordinate, u_TilingOffset);");
-        sb.AppendLine("#endif");
-        sb.AppendLine("    }");
-        sb.AppendLine("    else");
-        sb.AppendLine("    {");
-        sb.AppendLine("        gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // Discard");
-        sb.AppendLine("    }");
-        sb.AppendLine("    gl_Position = remapPositionZ(gl_Position);");
-        sb.AppendLine("#ifdef FOG");
-        sb.AppendLine("    FogHandle(gl_Position.z);");
-        sb.AppendLine("#endif");
-        sb.AppendLine("}");
+
+        // ========== 注入完整的粒子函数库（来自ParticleShaderTemplate） ==========
+        sb.Append(ParticleShaderTemplate.GetParticleVertexFunctions());
+
+        // ========== 注入完整的main函数（来自ParticleShaderTemplate） ==========
+        sb.Append(ParticleShaderTemplate.GetParticleVertexMainFunction());
+
         sb.AppendLine();
         sb.AppendLine("#endGLSL");
         sb.AppendLine();
@@ -5115,6 +9017,212 @@ internal class CustomShaderExporter
     }
 
     /// <summary>
+    /// 获取纹理的默认值
+    /// </summary>
+    private static string GetDefaultTextureValue(string propName)
+    {
+        string lowerName = propName.ToLower();
+
+        // Normal/Bump贴图
+        if (lowerName.Contains("normal") || lowerName.Contains("bump"))
+            return "\"bump\"";
+
+        // Distort贴图：默认黑色（可选效果，默认关闭）
+        if (lowerName.Contains("distort"))
+            return "\"black\"";
+
+        // Dissolve Amount贴图：默认黑色
+        if (lowerName.Contains("dissolveamount") || lowerName.Contains("dissolve_amount"))
+            return "\"black\"";
+
+        // 黑色贴图（通常用于遮罩、AO等）
+        if (lowerName.Contains("black") || lowerName.Contains("ao") ||
+            lowerName.Contains("occlusion") || lowerName.Contains("shadow"))
+            return "\"black\"";
+
+        // RimMap特殊处理：默认灰色
+        if (lowerName.Contains("rimmap") && !lowerName.Contains("mask"))
+            return "\"gray\"";
+
+        // 灰色贴图
+        if (lowerName.Contains("gray") || lowerName.Contains("grey") ||
+            lowerName.Contains("metallic"))
+            return "\"gray\"";
+
+        // 白色贴图（默认）
+        return "\"white\"";
+    }
+
+    /// <summary>
+    /// 获取Range类型的默认值
+    /// </summary>
+    private static float GetRangeDefaultValue(string propName, float min, float max)
+    {
+        string lowerName = propName.ToLower();
+
+        // ⭐ RotateAngle特殊处理：默认0.0（不是range的min值-360）
+        if (lowerName.Contains("rotateangle") || lowerName.Contains("rotate_angle"))
+        {
+            if (min <= 0.0f && max >= 0.0f)
+                return 0.0f;
+            return (min + max) / 2.0f; // 如果range不包含0，使用中间值
+        }
+
+        // Distort Strength特殊处理：默认0.0（可选效果，默认关闭）
+        if (lowerName.Contains("distort") && lowerName.Contains("strength"))
+        {
+            return 0.0f;
+        }
+
+        // Dissolve Distort Strength特殊处理：默认0.0
+        if (lowerName.Contains("dissolvedistortstrength"))
+        {
+            return 0.0f;
+        }
+
+        // EffectMainLightIntensity特殊处理：默认5.0
+        if (lowerName.Contains("effectmainlightintensity") || lowerName.Contains("effect_main_light_intensity"))
+        {
+            if (min <= 5.0f && max >= 5.0f)
+                return 5.0f;
+            return max; // 如果range不包含5.0，使用最大值
+        }
+
+        // RimLevel特殊处理：默认1.0
+        if (lowerName.Contains("rimlevel") || lowerName.Contains("rim_level"))
+        {
+            if (min <= 1.0f && max >= 1.0f)
+                return 1.0f;
+            return (min + max) / 2.0f;
+        }
+
+        // RimSharp特殊处理：默认2.0
+        if (lowerName.Contains("rimsharp") || lowerName.Contains("rim_sharp"))
+        {
+            if (min <= 2.0f && max >= 2.0f)
+                return 2.0f;
+            return (min + max) / 2.0f;
+        }
+
+        // Dissolve/Fade Range特殊处理：默认0.1
+        if ((lowerName.Contains("dissolve") || lowerName.Contains("fade") || lowerName.Contains("edge")) &&
+            lowerName.Contains("range"))
+        {
+            if (min <= 0.1f && max >= 0.1f)
+                return 0.1f;
+            return (min + max) / 2.0f;
+        }
+
+        // Multiplier/Intensity类型：默认1.0
+        if (lowerName.Contains("multiplier") || lowerName.Contains("intensity") ||
+            lowerName.Contains("scale") || lowerName.Contains("strength"))
+        {
+            // 如果range包含1.0，使用1.0
+            if (min <= 1.0f && max >= 1.0f)
+                return 1.0f;
+            // 否则使用中间值
+            return (min + max) / 2.0f;
+        }
+
+        // Center/Pivot类型：默认0.5
+        if (lowerName.Contains("center") || lowerName.Contains("pivot"))
+        {
+            if (min <= 0.5f && max >= 0.5f)
+                return 0.5f;
+            return (min + max) / 2.0f;
+        }
+
+        // Threshold类型：默认0.5
+        if (lowerName.Contains("threshold"))
+        {
+            if (min <= 0.5f && max >= 0.5f)
+                return 0.5f;
+            return (min + max) / 2.0f;
+        }
+
+        // Alpha/Occlusion类型：默认1.0
+        if (lowerName.Contains("alpha") || lowerName.Contains("occlusion"))
+        {
+            if (min <= 1.0f && max >= 1.0f)
+                return 1.0f;
+            return max; // 通常希望完全可见/无遮挡
+        }
+
+        // Smoothness/Metallic类型：默认0.0或0.5
+        if (lowerName.Contains("smoothness") || lowerName.Contains("metallic") ||
+            lowerName.Contains("roughness"))
+        {
+            return min; // 通常从最小值开始
+        }
+
+        // 默认：使用最小值
+        return min;
+    }
+
+    /// <summary>
+    /// 获取Float类型的默认值
+    /// </summary>
+    private static string GetFloatDefaultValue(string propName)
+    {
+        string lowerName = propName.ToLower();
+
+        // RotateAngle特殊处理：默认0.0（不是-360）
+        if (lowerName.Contains("rotateangle") || lowerName.Contains("rotate_angle"))
+        {
+            return "0.0";
+        }
+
+        // Distort Strength特殊处理：默认0.0（可选效果，默认关闭）
+        if (lowerName.Contains("distort") && lowerName.Contains("strength"))
+        {
+            return "0.0";
+        }
+
+        // Multiplier/Intensity/Scale类型：默认1.0
+        if (lowerName.Contains("multiplier") || lowerName.Contains("intensity") ||
+            lowerName.Contains("scale") || lowerName.Contains("strength"))
+        {
+            return "1.0";
+        }
+
+        // Center/Pivot类型：默认0.5
+        if (lowerName.Contains("center") || lowerName.Contains("pivot") ||
+            lowerName.Contains("rotatecenter"))
+        {
+            return "0.5";
+        }
+
+        // RemapMax类型：默认1.0
+        if (lowerName.Contains("remapmax") || lowerName.Contains("max"))
+        {
+            return "1.0";
+        }
+
+        // Alpha类型：默认1.0（完全不透明）
+        if (lowerName.Contains("alpha") && !lowerName.Contains("test"))
+        {
+            return "1.0";
+        }
+
+        // Level类型：默认1.0
+        if (lowerName.Contains("level"))
+        {
+            return "1.0";
+        }
+
+        // 特殊的命名约定检查
+        // 如果属性名明确表示是标志位（Use/Enable），默认0.0（关闭）
+        if (lowerName.StartsWith("use") || lowerName.StartsWith("enable") ||
+            lowerName.StartsWith("_use") || lowerName.StartsWith("_enable"))
+        {
+            return "0.0";
+        }
+
+        // 默认：0.0
+        return "0.0";
+    }
+
+    /// <summary>
     /// 生成uniform行 - 支持Range、默认值等
     /// </summary>
     private static string GenerateUniformLine(ShaderProperty prop)
@@ -5123,7 +9231,7 @@ internal class CustomShaderExporter
         string defaultValue;
         string rangeStr = "";
         string options = "";
-        
+
         switch (prop.type)
         {
             case ShaderUtil.ShaderPropertyType.TexEnv:
@@ -5131,18 +9239,21 @@ internal class CustomShaderExporter
                 if (prop.isCubemap)
                 {
                     typeStr = "TextureCube";
+                    defaultValue = "\"white\"";  // Cubemap默认值
                 }
                 else
                 {
                     typeStr = "Texture2D";
+                    // 根据纹理名称推断默认值
+                    defaultValue = GetDefaultTextureValue(prop.unityName);
                 }
-                
+
                 if (!string.IsNullOrEmpty(prop.define))
                 {
                     options = $", options: {{ define: \"{prop.define}\" }}";
                 }
-                return $"        {prop.layaName}: {{ type: {typeStr}{options} }},";
-                
+                return $"        {prop.layaName}: {{ type: {typeStr}, default: {defaultValue}{options} }},";
+
             case ShaderUtil.ShaderPropertyType.Color:
                 typeStr = "Color";
                 // 根据属性名推断默认值
@@ -5152,50 +9263,46 @@ internal class CustomShaderExporter
                     defaultValue = "[0, 0, 0, 0]";
                 else if (prop.unityName.Contains("Reflect"))
                     defaultValue = "[0.02, 0.02, 0.02, 0]";
+                else if (prop.unityName.Contains("EffectAmbientLightColor") || prop.unityName.Contains("Effect_Ambient_Light"))
+                    defaultValue = "[0.5, 0.5, 0.5, 1]";  // Effect环境光默认50%
+                else if (prop.unityName.Contains("EffectSSSColor") || prop.unityName.Contains("SSSColor"))
+                    defaultValue = "[0, 0, 0, 1]";  // 次表面散射默认关闭
+                else if (prop.unityName.Contains("RimColor") && !prop.unityName.Contains("Primary") && !prop.unityName.Contains("Secondary"))
+                    defaultValue = "[0.6, 0.8, 1, 1]";  // Rim默认蓝白色
                 else
                     defaultValue = "[1, 1, 1, 1]";
                 return $"        {prop.layaName}: {{ type: {typeStr}, default: {defaultValue} }},";
-                
+
             case ShaderUtil.ShaderPropertyType.Range:
                 typeStr = "Float";
                 // 使用Range的默认值（通常是中间值或最小值）
-                float rangeDefault = prop.rangeMin;
-                // 特殊属性的默认值
-                if (prop.unityName.Contains("Smoothness") || prop.unityName.Contains("Metallic"))
-                    rangeDefault = 0.0f;
-                else if (prop.unityName.Contains("Intensity") || prop.unityName.Contains("Scale"))
-                    rangeDefault = 1.0f;
-                else if (prop.unityName.Contains("Threshold"))
-                    rangeDefault = 0.5f;
-                else if (prop.unityName.Contains("Alpha") || prop.unityName.Contains("Occlusion"))
-                    rangeDefault = 1.0f;
-                    
+                float rangeDefault = GetRangeDefaultValue(prop.unityName, prop.rangeMin, prop.rangeMax);
+
                 defaultValue = rangeDefault.ToString("F1");
                 rangeStr = $", range: [{prop.rangeMin:F1}, {prop.rangeMax:F1}]";
                 return $"        {prop.layaName}: {{ type: {typeStr}, default: {defaultValue}{rangeStr} }},";
-                
+
             case ShaderUtil.ShaderPropertyType.Float:
                 typeStr = "Float";
                 // 根据属性名推断默认值
-                if (prop.unityName.Contains("Intensity") || prop.unityName.Contains("Scale"))
-                    defaultValue = "1.0";
-                else if (prop.unityName.Contains("RemapMax"))
-                    defaultValue = "1.0";
-                else
-                    defaultValue = "0.0";
+                defaultValue = GetFloatDefaultValue(prop.unityName);
                 return $"        {prop.layaName}: {{ type: {typeStr}, default: {defaultValue} }},";
-                
+
             case ShaderUtil.ShaderPropertyType.Vector:
                 typeStr = "Vector4";
                 // 根据属性名推断默认值
                 if (prop.unityName.Contains("TilingOffset") || prop.unityName.EndsWith("_ST"))
                     defaultValue = "[1, 1, 0, 0]";
+                else if (prop.unityName.Contains("EffectMainLightDir") || prop.unityName.Contains("Effect_Main_Light_Dir"))
+                    defaultValue = "[-0.5, 0.5, 1.0, 0.0]";  // Effect专用光照方向
                 else if (prop.unityName.Contains("LightDir"))
                     defaultValue = "[0, 1, 0, 1]";
+                else if (prop.unityName.Contains("PolarControl"))
+                    defaultValue = "[0.5, 0.5, 1, 1]";  // PolarCoordinates的默认值
                 else
                     defaultValue = "[0, 0, 0, 0]";
                 return $"        {prop.layaName}: {{ type: {typeStr}, default: {defaultValue} }},";
-                
+
             default:
                 return null;
         }
@@ -5204,8 +9311,8 @@ internal class CustomShaderExporter
     /// <summary>
     /// 导出材质文件
     /// </summary>
-    private static void ExportMaterialFile(Material material, Shader shader, string layaShaderName, 
-        JSONObject jsonData, ResoureMap resoureMap)
+    private static void ExportMaterialFile(Material material, Shader shader, string layaShaderName,
+        JSONObject jsonData, ResoureMap resoureMap, MaterialFile materialFile = null)
     {
         jsonData.AddField("version", "LAYAMATERIAL:04");
         JSONObject props = new JSONObject(JSONObject.Type.OBJECT);
@@ -5230,21 +9337,35 @@ internal class CustomShaderExporter
         // 导出纹理
         JSONObject textures = new JSONObject(JSONObject.Type.ARRAY);
         List<string> defines = new List<string>();
-        
+
+        // ⭐ FIX 1/3: Unity Keywords到Laya Defines映射（通用方案）
+        // 规则：去掉前缀 _ 和后缀 _ON
+        // 示例：_LAYERTYPE_THREE → LAYERTYPE_THREE, _USEDISTORT0_ON → USEDISTORT0
+        string[] unityKeywords = material.shaderKeywords;
+        if (unityKeywords != null && unityKeywords.Length > 0)
+        {
+            foreach (string keyword in unityKeywords)
+            {
+                string layaDefine = ConvertKeywordToDefine(keyword);
+                if (!string.IsNullOrEmpty(layaDefine) && !defines.Contains(layaDefine))
+                {
+                    defines.Add(layaDefine);
+                    Debug.Log($"LayaAir3D: Converted keyword '{keyword}' to define '{layaDefine}'");
+                }
+            }
+        }
+
         // 收集Shader属性用于特性检测
         List<ShaderProperty> shaderProperties = CollectShaderProperties(shader);
-        
+
         // 根据材质类型和Shader特性添加必要的宏定义
         bool hasNPR = (materialType == LayaMaterialType.PBR || materialType == LayaMaterialType.Custom) && HasNPRFeatures(shaderProperties);
         bool hasEmission = false;
-        
-        // Effect类型（粒子）默认启用顶点颜色和COLOR宏
-        if (materialType == LayaMaterialType.PARTICLESHURIKEN)
-        {
-            defines.Add("COLOR");
-            defines.Add("ENABLEVERTEXCOLOR");
-        }
-        
+
+        // ⭐ FIX 3/3: 不再自动为Effect类型添加COLOR和ENABLEVERTEXCOLOR
+        // 这些defines应该由Keywords映射生成，或者由shader特征检测生成
+        // 粒子shader（如Artist_Effect系列）使用不同的渲染逻辑，不需要这些defines
+
         // 检测shader源码中是否使用了顶点颜色
         bool usesVertexColor = DetectVertexColorInShader(shader);
         
@@ -5263,8 +9384,14 @@ internal class CustomShaderExporter
             {
                 case ShaderUtil.ShaderPropertyType.TexEnv:
                     ExportTextureProperty(material, propName, layaName, textures, defines, resoureMap, shader, i);
+
+                    // ⭐ FIX 2/3: 导出纹理Tiling/Offset（通用方案）
+                    // 规则：Unity的 _MainTex/_BaseMap/_AlbedoTexture → u_TilingOffset
+                    //       其他纹理 _XXX → u_XXX_ST
+                    // 格式：[scaleX, scaleY, offsetX, offsetY]
+                    ExportTextureTilingOffset(material, propName, layaName, props);
                     break;
-                    
+
                 case ShaderUtil.ShaderPropertyType.Color:
                     ExportColorProperty(material, propName, layaName, props);
                     // 检测自发光
@@ -5341,8 +9468,20 @@ internal class CustomShaderExporter
                 }
             }
         }
-        // Effect类型的宏定义已在前面添加
-        
+        // ⭐ Note: Effect类型（粒子）的宏定义由Keywords映射自动生成，不再手动添加
+
+        // ⭐ FIX 4/4: 粒子Mesh渲染模式修复 - 添加RENDERMODE_MESH define
+        // 当粒子系统使用Mesh渲染模式时，shader需要v_MeshColor变量
+        // 必须添加RENDERMODE_MESH宏来启用条件编译块
+        if (materialFile != null && materialFile.IsParticleMeshMode())
+        {
+            if (!defines.Contains("RENDERMODE_MESH"))
+            {
+                defines.Add("RENDERMODE_MESH");
+                Debug.Log($"LayaAir3D: Added RENDERMODE_MESH define for particle mesh rendering mode");
+            }
+        }
+
         // 添加宏定义
         JSONObject definesArray = new JSONObject(JSONObject.Type.ARRAY);
         foreach (string define in defines)
@@ -5416,6 +9555,50 @@ internal class CustomShaderExporter
                 defines.Add(define);
             }
         }
+    }
+
+    /// <summary>
+    /// 导出纹理Tiling/Offset（通用方案）
+    /// Unity纹理的Scale和Offset映射为Laya的_ST uniform
+    /// 规则：_MainTex/_BaseMap/_AlbedoTexture → u_TilingOffset
+    ///       其他纹理 _XXX → u_XXX_ST
+    /// 格式：[scaleX, scaleY, offsetX, offsetY]
+    /// </summary>
+    private static void ExportTextureTilingOffset(Material material, string unityPropName, string layaPropName, JSONObject props)
+    {
+        if (!material.HasProperty(unityPropName))
+            return;
+
+        // 获取纹理的Tiling和Offset
+        Vector2 scale = material.GetTextureScale(unityPropName);
+        Vector2 offset = material.GetTextureOffset(unityPropName);
+
+        // 确定Laya属性名
+        string tilingOffsetName;
+
+        // 主纹理使用 u_TilingOffset
+        if (unityPropName == "_MainTex" || unityPropName == "_BaseMap" || unityPropName == "_AlbedoTexture")
+        {
+            tilingOffsetName = "u_TilingOffset";
+        }
+        else
+        {
+            // 其他纹理使用 u_XXX_ST
+            // 去掉前缀 _，添加后缀 _ST
+            string texName = unityPropName.TrimStart('_');
+            tilingOffsetName = "u_" + texName + "_ST";
+        }
+
+        // 添加到材质数据
+        JSONObject tilingOffsetValue = new JSONObject(JSONObject.Type.ARRAY);
+        tilingOffsetValue.Add(scale.x);
+        tilingOffsetValue.Add(scale.y);
+        tilingOffsetValue.Add(offset.x);
+        tilingOffsetValue.Add(offset.y);
+
+        props.AddField(tilingOffsetName, tilingOffsetValue);
+
+        Debug.Log($"LayaAir3D: Exported texture tiling/offset '{unityPropName}' as '{tilingOffsetName}': [{scale.x}, {scale.y}, {offset.x}, {offset.y}]");
     }
 
     /// <summary>

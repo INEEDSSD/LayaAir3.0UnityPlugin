@@ -49,8 +49,8 @@ namespace LayaExport
                 return null;
             }
             
-            // 检查粒子顶点数量限制 - 暂时关闭
-            // CheckParticleVertexLimit(ps, psr, gameObject.name);
+            // ⭐ 检查粒子系统mesh顶点数量限制
+            CheckParticleVertexLimit(ps, psr, gameObject.name, resoureMap);
 
             JSONObject comp = new JSONObject(JSONObject.Type.OBJECT);
             comp.AddField("_$type", "ShurikenParticleRenderer");
@@ -73,7 +73,7 @@ namespace LayaExport
                         // 使用ResoureMap的材质导出逻辑（如果可用）
                         if (resoureMap != null)
                         {
-                            sharedMaterials.Add(resoureMap.GetMaterialData(mat));
+                            sharedMaterials.Add(resoureMap.GetMaterialData(mat, psr));
                         }
                         else
                         {
@@ -1092,51 +1092,215 @@ namespace LayaExport
         #region Validation Methods
 
         /// <summary>
-        /// 检查粒子系统顶点数量是否超过LayaAir限制
+        /// 检查并处理粒子系统顶点数量超限问题
         /// 只检查Mesh渲染模式的粒子系统
+        /// LayaAir限制：粒子系统总顶点数 = maxParticles × meshVertexCount ≤ 65535
         /// </summary>
-        private static void CheckParticleVertexLimit(ParticleSystem ps, ParticleSystemRenderer psr, string objectName)
+        private static void CheckParticleVertexLimit(ParticleSystem ps, ParticleSystemRenderer psr, string objectName, ResoureMap resoureMap = null)
         {
             // 只有Mesh渲染模式才需要检查顶点限制
             if (psr.renderMode != ParticleSystemRenderMode.Mesh)
             {
                 return;
             }
-            
+
             // 没有Mesh则不需要检查
             if (psr.mesh == null)
             {
                 return;
             }
-            
+
             int maxParticles = ps.main.maxParticles;
-            int meshVertexCount = psr.mesh.vertexCount;
+            Mesh originalMesh = psr.mesh;
+            int meshVertexCount = originalMesh.vertexCount;
             int totalVertexCount = maxParticles * meshVertexCount;
-            
-            if (totalVertexCount > MAX_PARTICLE_VERTEX_COUNT)
+            int vertexLimit = ExportConfig.ParticleMeshMaxVertices;
+
+#if ENABLE_PARTICLE_MESH_OPTIMIZATION
+            if (totalVertexCount > vertexLimit)
             {
-                // 计算建议的最大粒子数
-                int suggestedMaxParticles = MAX_PARTICLE_VERTEX_COUNT / meshVertexCount;
-                
-                string warningMessage = string.Format(
-                    "LayaAir3D Warning: 粒子系统 '{0}' (Mesh模式) 的顶点数量超过LayaAir限制!\n" +
+                // ⚠️ 粒子Mesh优化功能已暂时禁用
+                // 如需启用，请在项目设置中添加 ENABLE_PARTICLE_MESH_OPTIMIZATION 脚本定义符号
+
+                // 计算建议的最大粒子数和目标顶点数
+                int suggestedMaxParticles = MeshSimplifier.CalculateSuggestedMaxParticles(meshVertexCount, vertexLimit);
+                int targetMeshVertexCount = MeshSimplifier.CalculateTargetVertexCount(maxParticles, vertexLimit);
+
+                string problemDescription = string.Format(
+                    "粒子系统 '{0}' (Mesh模式) 的顶点数量超过限制!\n" +
                     "当前配置: maxParticles={1}, Mesh顶点数={2}, 总顶点数={3}\n" +
-                    "LayaAir限制: 总顶点数不能超过 {4}\n" +
-                    "建议: 将 maxParticles 减少到 {5} 或以下，或者使用顶点数更少的Mesh",
-                    objectName, maxParticles, meshVertexCount, totalVertexCount, 
-                    MAX_PARTICLE_VERTEX_COUNT, suggestedMaxParticles);
-                
-                Debug.LogWarning(warningMessage);
-                
-                // 同时在编辑器中显示对话框提醒用户
-                if (!Application.isBatchMode)
+                    "限制: 总顶点数 ≤ {4}",
+                    objectName, maxParticles, meshVertexCount, totalVertexCount, vertexLimit);
+
+                // 尝试自动简化mesh
+                if (ExportConfig.AutoSimplifyParticleMesh)
                 {
-                    EditorUtility.DisplayDialog(
-                        "LayaAir3D 粒子导出警告",
-                        warningMessage,
-                        "我知道了");
+                    Debug.Log($"LayaAir3D: {problemDescription}");
+
+                    // ⭐ 优先检查ParticleSystemRenderer是否有meshes数组（支持多个mesh）
+                    // 如果meshes[1]存在，可以作为低面数版本
+                    Mesh simplifiedMesh = null;
+                    bool useManualLOD = false;
+
+                    #if UNITY_2018_1_OR_NEWER
+                    if (psr.meshCount > 1)
+                    {
+                        Mesh[] meshes = new Mesh[psr.meshCount];
+                        int actualMeshCount = psr.GetMeshes(meshes);
+
+                        if (actualMeshCount > 1 && meshes[1] != null)
+                        {
+                            Mesh lodMesh = meshes[1];
+
+                            int lodTotalVertices = maxParticles * lodMesh.vertexCount;
+                            if (lodTotalVertices <= vertexLimit * 1.3f) // 弹性判断
+                            {
+                                simplifiedMesh = lodMesh;
+                                useManualLOD = true;
+                                Debug.Log($"LayaAir3D: 检测到手动LOD Mesh (meshes[1]): {lodMesh.name}");
+                                Debug.Log($"  顶点数: {lodMesh.vertexCount}, 总顶点: {lodTotalVertices}");
+                            }
+                            else
+                            {
+                                Debug.LogWarning($"LayaAir3D: meshes[1]的顶点数({lodTotalVertices})仍超限，使用自动简化");
+                            }
+                        }
+                    }
+                    #endif
+
+                    if (!useManualLOD)
+                    {
+                        Debug.Log($"LayaAir3D: 尝试自动简化mesh到 {targetMeshVertexCount} 个顶点...");
+
+                        try
+                        {
+                            simplifiedMesh = MeshSimplifier.SimplifyMesh(
+                                originalMesh,
+                                targetMeshVertexCount,
+                                ExportConfig.ParticleMeshSimplifyQuality
+                            );
+                        }
+                        catch (System.Exception e)
+                        {
+                            Debug.LogError($"LayaAir3D: Mesh简化过程中出现错误: {e.Message}");
+                            simplifiedMesh = null;
+                        }
+                    }
+
+                    // 检查简化后的总顶点数
+                    if (simplifiedMesh != null)
+                    {
+                            int newTotalVertices = maxParticles * simplifiedMesh.vertexCount;
+
+                            // ⭐ 允许适度超限以保证mesh质量
+                            // 根据简化质量参数决定允许超限比例
+                            // quality越高（0.7-1.0），允许超限越多，质量越好
+                            float qualityFactor = ExportConfig.ParticleMeshSimplifyQuality;
+                            float allowedOverrunRatio = 1.0f + qualityFactor * 0.8f; // 0.7质量→允许超出56%
+                            int flexibleLimit = Mathf.CeilToInt(vertexLimit * allowedOverrunRatio);
+                            bool meetsFlexibleLimit = newTotalVertices <= flexibleLimit;
+                            bool meetsStrictLimit = newTotalVertices <= vertexLimit;
+
+                            // 计算简化比例
+                            float reductionPercent = (1.0f - (float)simplifiedMesh.vertexCount / meshVertexCount) * 100;
+
+                            Debug.Log($"LayaAir3D: 简化结果检查");
+                            Debug.Log($"  简化后Mesh顶点数: {simplifiedMesh.vertexCount} (原始: {meshVertexCount}, 减少 {reductionPercent:F1}%)");
+                            Debug.Log($"  总顶点数: {newTotalVertices} (原始: {totalVertexCount})");
+                            Debug.Log($"  严格限制: {vertexLimit}, 满足: {(meetsStrictLimit ? "✓" : "✗")}");
+                            Debug.Log($"  弹性限制: {flexibleLimit} (quality={qualityFactor:F1}, 允许超出{(allowedOverrunRatio-1)*100:F0}%), 满足: {(meetsFlexibleLimit ? "✓" : "✗")}");
+
+                            if (meetsFlexibleLimit)
+                            {
+                                // 保留原始mesh的名称，确保mesh名称一致
+                                simplifiedMesh.name = originalMesh.name;
+
+                                // 替换为简化后的mesh
+                                psr.mesh = simplifiedMesh;
+
+                                // ⭐ 关键修复：如果使用ResoureMap，需要强制更新缓存
+                                if (resoureMap != null)
+                                {
+                                    // 获取原始mesh的路径
+                                    string originalPath = AssetsUtil.GetMeshPath(originalMesh);
+
+                                    // 注册简化mesh实例到原始路径的映射
+                                    resoureMap.RegisterMeshPath(simplifiedMesh, originalPath);
+
+                                    // 移除原始mesh的缓存
+                                    resoureMap.RemoveFileData(originalPath);
+
+                                    // 添加简化后的mesh到ResoureMap（使用原始mesh的路径）
+                                    MeshFile simplifiedMeshFile = new MeshFile(simplifiedMesh, psr, originalPath);
+                                    resoureMap.AddExportFile(simplifiedMeshFile);
+
+                                    Debug.Log($"LayaAir3D: 已更新ResoureMap中的Mesh缓存: {originalPath}");
+                                }
+
+                                string statusIcon = meetsStrictLimit ? "✓" : "⚠";
+                                string statusText = meetsStrictLimit ? "完全满足限制" : "超出严格限制但在可接受范围内";
+
+                                string successMessage = string.Format(
+                                    "{0} 成功简化粒子Mesh\n" +
+                                    "  Mesh顶点: {1} → {2} (减少 {3:F1}%)\n" +
+                                    "  总顶点数: {4} → {5}\n" +
+                                    "  状态: {6}",
+                                    statusIcon,
+                                    meshVertexCount, simplifiedMesh.vertexCount, reductionPercent,
+                                    totalVertexCount, newTotalVertices,
+                                    statusText);
+
+                                Debug.Log($"LayaAir3D: {successMessage}");
+
+                                if (!meetsStrictLimit)
+                                {
+                                    Debug.Log($"LayaAir3D: 提示 - 如需严格满足限制({vertexLimit})，可以:");
+                                    Debug.Log($"  1. 降低简化质量到 0.5-0.6 (当前 {qualityFactor:F1})");
+                                    Debug.Log($"  2. 减少maxParticles到 {suggestedMaxParticles} (当前 {maxParticles})");
+                                    Debug.Log($"  3. 提高顶点数限制到 {newTotalVertices} 以上");
+                                }
+
+                                // 简化成功，不再显示警告
+                                return;
+                            }
+                            else
+                            {
+                                Debug.LogWarning($"LayaAir3D: Mesh简化后仍超出弹性限制");
+                                Debug.LogWarning($"  总顶点数 {newTotalVertices} > 弹性限制 {flexibleLimit}");
+                                Debug.LogWarning($"  建议: 提高简化质量到 0.8-0.9, 或降低maxParticles到 {suggestedMaxParticles}, 或提高顶点限制");
+                            }
+                    }
+                    else
+                    {
+                        Debug.LogWarning("LayaAir3D: Mesh简化返回null，将显示警告");
+                    }
+                }
+
+                // 显示警告（如果没有自动简化或简化失败）
+                if (ExportConfig.ShowParticleMeshWarning)
+                {
+                    string warningMessage = string.Format(
+                        "{0}\n\n" +
+                        "解决方案:\n" +
+                        "1. 将 maxParticles 减少到 {1} 或以下\n" +
+                        "2. 使用顶点数更少的Mesh (目标: ≤{2} 个顶点)\n" +
+                        "3. 启用'自动简化粒子Mesh'选项 (LayaAir导出设置)\n" +
+                        "4. 在导出设置中调整顶点数限制",
+                        problemDescription, suggestedMaxParticles, targetMeshVertexCount);
+
+                    Debug.LogWarning($"LayaAir3D: {warningMessage}");
+
+                    // 在编辑器中显示对话框提醒用户
+                    if (!Application.isBatchMode)
+                    {
+                        EditorUtility.DisplayDialog(
+                            "LayaAir3D 粒子导出警告",
+                            warningMessage,
+                            "我知道了");
+                    }
                 }
             }
+#endif
         }
 
         #endregion

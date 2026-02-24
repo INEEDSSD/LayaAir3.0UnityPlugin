@@ -580,10 +580,10 @@ internal class MetarialUitls
             return false;
         }
     }
-    public static void WriteMetarial(Material material, JSONObject jsonData, ResoureMap resoureMap)
+    public static void WriteMetarial(Material material, JSONObject jsonData, ResoureMap resoureMap, MaterialFile materialFile = null)
     {
         string shaderName = material.shader.name;
-        
+
         // 检查是否有内置配置
         if (!MaterialPropsConfigs.ContainsKey(shaderName))
         {
@@ -591,7 +591,7 @@ internal class MetarialUitls
             if (ExportConfig.EnableCustomShaderExport)
             {
                 // 自动导出自定义Shader材质
-                CustomShaderExporter.WriteAutoCustomShaderMaterial(material, jsonData, resoureMap);
+                CustomShaderExporter.WriteAutoCustomShaderMaterial(material, jsonData, resoureMap, materialFile);
                 return;
             }
             else

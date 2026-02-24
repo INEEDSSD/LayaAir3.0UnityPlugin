@@ -32,6 +32,12 @@ public class ExportConfig
     //启用自定义Shader导出
     private static bool _EnableCustomShaderExport = false;
 
+    //粒子系统Mesh顶点限制处理
+    private static bool _AutoSimplifyParticleMesh = false;
+    private static int _ParticleMeshMaxVertices = 65535;
+    private static float _ParticleMeshSimplifyQuality = 0.7f; // 0-1之间，越高质量越好
+    private static bool _ShowParticleMeshWarning = true;
+
     //场景 or 预制体
     public static int FirstlevelMenu
     {
@@ -193,6 +199,62 @@ public class ExportConfig
         }
     }
 
+    //粒子系统Mesh自动简化
+    public static bool AutoSimplifyParticleMesh
+    {
+        get { return _AutoSimplifyParticleMesh; }
+        set
+        {
+            if (_AutoSimplifyParticleMesh != value)
+            {
+                _AutoSimplifyParticleMesh = value;
+                _updateConfig = true;
+            }
+        }
+    }
+
+    //粒子系统总顶点数限制
+    public static int ParticleMeshMaxVertices
+    {
+        get { return _ParticleMeshMaxVertices; }
+        set
+        {
+            if (_ParticleMeshMaxVertices != value)
+            {
+                _ParticleMeshMaxVertices = value;
+                _updateConfig = true;
+            }
+        }
+    }
+
+    //Mesh简化质量 (0-1)
+    public static float ParticleMeshSimplifyQuality
+    {
+        get { return _ParticleMeshSimplifyQuality; }
+        set
+        {
+            if (_ParticleMeshSimplifyQuality != value)
+            {
+                _ParticleMeshSimplifyQuality = Mathf.Clamp01(value);
+                _updateConfig = true;
+            }
+        }
+    }
+
+    //是否显示粒子Mesh警告
+    public static bool ShowParticleMeshWarning
+    {
+        get { return _ShowParticleMeshWarning; }
+        set
+        {
+            if (_ShowParticleMeshWarning != value)
+            {
+                _ShowParticleMeshWarning = value;
+                _updateConfig = true;
+            }
+        }
+    }
+
     public static string SavePath()
     {
         if (CustomizeDirectory)
@@ -229,7 +291,20 @@ public class ExportConfig
         // 自定义Shader配置
         if (xn.SelectSingleNode("EnableCustomShaderExport") != null)
             EnableCustomShaderExport = bool.Parse(xn.SelectSingleNode("EnableCustomShaderExport").InnerText);
-        
+
+        // 粒子系统Mesh优化配置
+        if (xn.SelectSingleNode("AutoSimplifyParticleMesh") != null)
+            AutoSimplifyParticleMesh = bool.Parse(xn.SelectSingleNode("AutoSimplifyParticleMesh").InnerText);
+
+        if (xn.SelectSingleNode("ParticleMeshMaxVertices") != null)
+            ParticleMeshMaxVertices = int.Parse(xn.SelectSingleNode("ParticleMeshMaxVertices").InnerText);
+
+        if (xn.SelectSingleNode("ParticleMeshSimplifyQuality") != null)
+            ParticleMeshSimplifyQuality = float.Parse(xn.SelectSingleNode("ParticleMeshSimplifyQuality").InnerText);
+
+        if (xn.SelectSingleNode("ShowParticleMeshWarning") != null)
+            ShowParticleMeshWarning = bool.Parse(xn.SelectSingleNode("ShowParticleMeshWarning").InnerText);
+
         _updateConfig = false;
     }
     public static void saveConfiguration()
@@ -258,7 +333,20 @@ public class ExportConfig
         // 自定义Shader配置
         if (xn.SelectSingleNode("EnableCustomShaderExport") != null)
             xn.SelectSingleNode("EnableCustomShaderExport").InnerText = EnableCustomShaderExport.ToString();
-        
+
+        // 粒子系统Mesh优化配置
+        if (xn.SelectSingleNode("AutoSimplifyParticleMesh") != null)
+            xn.SelectSingleNode("AutoSimplifyParticleMesh").InnerText = AutoSimplifyParticleMesh.ToString();
+
+        if (xn.SelectSingleNode("ParticleMeshMaxVertices") != null)
+            xn.SelectSingleNode("ParticleMeshMaxVertices").InnerText = ParticleMeshMaxVertices.ToString();
+
+        if (xn.SelectSingleNode("ParticleMeshSimplifyQuality") != null)
+            xn.SelectSingleNode("ParticleMeshSimplifyQuality").InnerText = ParticleMeshSimplifyQuality.ToString();
+
+        if (xn.SelectSingleNode("ShowParticleMeshWarning") != null)
+            xn.SelectSingleNode("ShowParticleMeshWarning").InnerText = ShowParticleMeshWarning.ToString();
+
         xmlDoc.Save(configUrl);
     }
 

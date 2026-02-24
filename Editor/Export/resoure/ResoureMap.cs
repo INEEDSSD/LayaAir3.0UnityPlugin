@@ -5,14 +5,18 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using LayaExport;
 
-internal class ResoureMap 
+internal class ResoureMap
 {
     private Dictionary<string, FileData> exportFiles;
     private List<NodeMap> nodemaps;
+    // Mesh实例ID到路径的映射表（用于简化后的粒子mesh）
+    private Dictionary<int, string> meshInstanceToPath;
+
     public ResoureMap()
     {
         this.exportFiles = new Dictionary<string, FileData>();
         this.nodemaps = new List<NodeMap>();
+        this.meshInstanceToPath = new Dictionary<int, string>();
     }
 
     public PerfabFile getPerfabFile(string path)
@@ -69,7 +73,18 @@ internal class ResoureMap
 
     public MeshFile GetMeshFile(Mesh mesh,Renderer renderer)
     {
-        string path = AssetsUtil.GetMeshPath(mesh);
+        // ⭐ 先检查是否有自定义路径映射（用于简化后的粒子mesh）
+        string path;
+        int meshInstanceID = mesh.GetInstanceID();
+        if (meshInstanceToPath.ContainsKey(meshInstanceID))
+        {
+            path = meshInstanceToPath[meshInstanceID];
+        }
+        else
+        {
+            path = AssetsUtil.GetMeshPath(mesh);
+        }
+
         if (!this.HaveFileData(path))
         {
             this.AddExportFile(new MeshFile(mesh, renderer));
@@ -77,18 +92,36 @@ internal class ResoureMap
         return this.GetFileData(path) as MeshFile;
     }
 
-    public MaterialFile GetMaterialFile(Material material)
+    /// <summary>
+    /// 注册mesh实例到路径的映射（用于程序生成的mesh，如简化后的粒子mesh）
+    /// </summary>
+    public void RegisterMeshPath(Mesh mesh, string customPath)
+    {
+        int meshInstanceID = mesh.GetInstanceID();
+        meshInstanceToPath[meshInstanceID] = customPath;
+    }
+
+    public MaterialFile GetMaterialFile(Material material, Renderer renderer = null)
     {
         if (material == null)
         {
             Debug.LogWarning("LayaAir3D: Material is null, cannot export.");
             return null;
         }
-        
+
         string path = AssetsUtil.GetMaterialPath(material);
         if (!this.HaveFileData(path))
         {
-            this.AddExportFile(new MaterialFile(this, material));
+            this.AddExportFile(new MaterialFile(this, material, renderer));
+        }
+        else
+        {
+            // Update renderer type information if this material is used by a different renderer type
+            MaterialFile existingFile = this.GetFileData(path) as MaterialFile;
+            if (existingFile != null && renderer != null)
+            {
+                existingFile.AddRendererUsage(renderer);
+            }
         }
         return this.GetFileData(path) as MaterialFile;
     }
@@ -171,6 +204,14 @@ internal class ResoureMap
     public bool HaveFileData(string path)
     {
         return exportFiles.ContainsKey(path);
+    }
+
+    public void RemoveFileData(string path)
+    {
+        if (exportFiles.ContainsKey(path))
+        {
+            exportFiles.Remove(path);
+        }
     }
 
     public void SaveAllFile()
@@ -319,7 +360,7 @@ internal class ResoureMap
         GameObject gameObject = skinnedMeshRenderer.gameObject;
         for (var i = 0; i < materials.Length; i++)
         {
-            sharedMaterials.Add(this.GetMaterialData(materials[i]));
+            sharedMaterials.Add(this.GetMaterialData(materials[i], skinnedMeshRenderer));
         }
 
         JSONObject compData = new JSONObject(JSONObject.Type.OBJECT);
@@ -370,7 +411,7 @@ internal class ResoureMap
             if (mat == null) {
                 Debug.LogWarningFormat(gameObject, "LayaAir3D Warning(Code:1002) : " + gameObject.name + "'s MeshRender Component materials data can't be null!");
             } else {
-                sharedMaterials.Add(this.GetMaterialData(mat));
+                sharedMaterials.Add(this.GetMaterialData(mat, render));
             }
         }
 
@@ -654,13 +695,13 @@ internal class ResoureMap
         }
     }
 
-    public JSONObject GetMaterialData(Material material)
+    public JSONObject GetMaterialData(Material material, Renderer renderer = null)
     {
         JSONObject materFiledata = new JSONObject(JSONObject.Type.OBJECT);
         materFiledata.AddField("_$type", "Material");
         if (material != null)
         {
-            MaterialFile jsonFile = this.GetMaterialFile(material);
+            MaterialFile jsonFile = this.GetMaterialFile(material, renderer);
             if (jsonFile != null)
             {
                 materFiledata.AddField("_$uuid", jsonFile.uuid);

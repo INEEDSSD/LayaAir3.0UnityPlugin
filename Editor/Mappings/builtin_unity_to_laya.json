@@ -1,0 +1,396 @@
+{
+  "version": "1.0.0",
+  "name": "Unity to LayaAir Builtin Mappings",
+  "description": "内置的Unity Shader到LayaAir转换映射规则",
+
+  "mappings": {
+    "types": [
+      {
+        "from": "float4",
+        "to": "vec4",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL float4 到 GLSL vec4"
+      },
+      {
+        "from": "float3",
+        "to": "vec3",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL float3 到 GLSL vec3"
+      },
+      {
+        "from": "float2",
+        "to": "vec2",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL float2 到 GLSL vec2"
+      },
+      {
+        "from": "half4",
+        "to": "vec4",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL half4 到 GLSL vec4"
+      },
+      {
+        "from": "half3",
+        "to": "vec3",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL half3 到 GLSL vec3"
+      },
+      {
+        "from": "half2",
+        "to": "vec2",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL half2 到 GLSL vec2"
+      },
+      {
+        "from": "half",
+        "to": "float",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL half 到 GLSL float"
+      },
+      {
+        "from": "fixed4",
+        "to": "vec4",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL fixed4 到 GLSL vec4"
+      },
+      {
+        "from": "fixed3",
+        "to": "vec3",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL fixed3 到 GLSL vec3"
+      },
+      {
+        "from": "fixed2",
+        "to": "vec2",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL fixed2 到 GLSL vec2"
+      },
+      {
+        "from": "fixed",
+        "to": "float",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL fixed 到 GLSL float"
+      }
+    ],
+
+    "functions": [
+      {
+        "from": "tex2D({0}, {1})",
+        "to": "texture2D({0}, {1})",
+        "context": "fragment",
+        "priority": 100,
+        "description": "纹理采样函数"
+      },
+      {
+        "from": "tex2Dlod({0}, {1})",
+        "to": "texture2DLodEXT({0}, {1}.xy, {1}.w)",
+        "context": "all",
+        "priority": 100,
+        "description": "带LOD的纹理采样"
+      },
+      {
+        "from": "texCUBE({0}, {1})",
+        "to": "textureCube({0}, {1})",
+        "context": "fragment",
+        "priority": 100,
+        "description": "立方体纹理采样"
+      },
+      {
+        "from": "lerp({0}, {1}, {2})",
+        "to": "mix({0}, {1}, {2})",
+        "context": "all",
+        "priority": 100,
+        "description": "线性插值"
+      },
+      {
+        "from": "frac({0})",
+        "to": "fract({0})",
+        "context": "all",
+        "priority": 100,
+        "description": "小数部分"
+      },
+      {
+        "from": "saturate({0})",
+        "to": "clamp({0}, 0.0, 1.0)",
+        "context": "all",
+        "priority": 100,
+        "description": "饱和度夹紧"
+      },
+      {
+        "from": "atan2({0}, {1})",
+        "to": "atan({0}, {1})",
+        "context": "all",
+        "priority": 100,
+        "description": "反正切函数"
+      },
+      {
+        "from": "ddx({0})",
+        "to": "dFdx({0})",
+        "context": "fragment",
+        "priority": 100,
+        "description": "X方向偏导数"
+      },
+      {
+        "from": "ddy({0})",
+        "to": "dFdy({0})",
+        "context": "fragment",
+        "priority": 100,
+        "description": "Y方向偏导数"
+      },
+      {
+        "from": "clip({0})",
+        "to": "if (({0}) < 0.0) discard",
+        "context": "fragment",
+        "priority": 100,
+        "description": "裁剪函数"
+      },
+      {
+        "from": "mul({0}, {1})",
+        "to": "({0} * {1})",
+        "context": "all",
+        "priority": 100,
+        "description": "矩阵/向量乘法"
+      }
+    ],
+
+    "variables": [
+      {
+        "from": "_Time",
+        "to": "vec4(u_CurrentTime * 0.05, u_CurrentTime, u_CurrentTime * 2.0, u_CurrentTime * 3.0)",
+        "context": "all",
+        "priority": 100,
+        "description": "Unity时间变量"
+      },
+      {
+        "from": "_WorldSpaceCameraPos",
+        "to": "u_CameraPos",
+        "context": "all",
+        "priority": 100,
+        "description": "相机世界空间位置"
+      },
+      {
+        "from": "_ProjectionParams",
+        "to": "u_ProjectionParams",
+        "context": "all",
+        "priority": 100,
+        "description": "投影参数"
+      },
+      {
+        "from": "_ScreenParams",
+        "to": "u_ScreenParams",
+        "context": "all",
+        "priority": 100,
+        "description": "屏幕参数"
+      },
+      {
+        "from": "_ZBufferParams",
+        "to": "u_ZBufferParams",
+        "context": "all",
+        "priority": 100,
+        "description": "深度缓冲参数"
+      }
+    ],
+
+    "patterns": [
+      {
+        "name": "unity_matrix_mvp",
+        "pattern": "UNITY_MATRIX_MVP",
+        "replacement": "(u_Projection * u_View * u_World)",
+        "context": "vertex",
+        "priority": 90,
+        "description": "Unity MVP矩阵"
+      },
+      {
+        "name": "unity_matrix_mv",
+        "pattern": "UNITY_MATRIX_MV",
+        "replacement": "(u_View * u_World)",
+        "context": "vertex",
+        "priority": 90,
+        "description": "Unity MV矩阵"
+      },
+      {
+        "name": "unity_matrix_v",
+        "pattern": "UNITY_MATRIX_V",
+        "replacement": "u_View",
+        "context": "all",
+        "priority": 90,
+        "description": "Unity View矩阵"
+      },
+      {
+        "name": "unity_matrix_p",
+        "pattern": "UNITY_MATRIX_P",
+        "replacement": "u_Projection",
+        "context": "all",
+        "priority": 90,
+        "description": "Unity Projection矩阵"
+      },
+      {
+        "name": "unity_matrix_it_mv",
+        "pattern": "UNITY_MATRIX_IT_MV",
+        "replacement": "transpose(inverse(u_View * u_World))",
+        "context": "vertex",
+        "priority": 90,
+        "description": "Unity inverse-transpose MV矩阵"
+      }
+    ],
+
+    "includes": [
+      {
+        "from": "#include \"UnityCG.cginc\"",
+        "to": [
+          "#include \"Camera.glsl\";",
+          "#include \"Scene.glsl\";",
+          "#include \"Math.glsl\";"
+        ],
+        "context": "all",
+        "priority": 100
+      },
+      {
+        "from": "#include \"AutoLight.cginc\"",
+        "to": [
+          "#include \"Scene.glsl\";",
+          "#include \"ShadowHelper.glsl\";"
+        ],
+        "context": "all",
+        "priority": 100
+      },
+      {
+        "from": "#include \"Lighting.cginc\"",
+        "to": [
+          "#include \"Scene.glsl\";",
+          "#include \"PBRCore.glsl\";"
+        ],
+        "context": "all",
+        "priority": 100
+      }
+    ],
+
+    "particle_mappings": {
+      "variables": [
+        {
+          "from": "_MainTex",
+          "to": "u_AlbedoTexture",
+          "context": "particle",
+          "description": "粒子主纹理"
+        },
+        {
+          "from": "_MainTex_ST",
+          "to": "u_TilingOffset",
+          "context": "particle",
+          "description": "粒子纹理Tiling/Offset"
+        },
+        {
+          "from": "_TintColor",
+          "to": "u_LayerColor",
+          "context": "particle",
+          "description": "粒子颜色"
+        },
+        {
+          "from": "_LayerColor",
+          "to": "u_LayerColor",
+          "context": "particle",
+          "description": "图层颜色"
+        },
+        {
+          "from": "_LayerMultiplier",
+          "to": "u_LayerMultiplier",
+          "context": "particle",
+          "description": "图层强度"
+        },
+        {
+          "from": "_Alpha",
+          "to": "u_Alpha",
+          "context": "particle",
+          "description": "粒子透明度"
+        }
+      ],
+      "includes": [
+        {
+          "from": "#include \"UnityCG.cginc\"",
+          "to": [
+            "#include \"Camera.glsl\";",
+            "#include \"particleShuriKenSpriteVS.glsl\";",
+            "#include \"Math.glsl\";",
+            "#include \"MathGradient.glsl\";",
+            "#include \"Color.glsl\";",
+            "#include \"Scene.glsl\";",
+            "#include \"SceneFogInput.glsl\";"
+          ],
+          "context": "particle_vertex",
+          "description": "粒子顶点shader includes"
+        },
+        {
+          "from": "#include \"UnityCG.cginc\"",
+          "to": [
+            "#include \"Scene.glsl\";",
+            "#include \"SceneFog.glsl\";",
+            "#include \"Color.glsl\";",
+            "#include \"Camera.glsl\";"
+          ],
+          "context": "particle_fragment",
+          "description": "粒子片段shader includes"
+        }
+      ],
+      "defines": [
+        {
+          "from": "_LAYERTYPE_TWO",
+          "to": "LAYERTYPE_TWO",
+          "description": "双层纹理"
+        },
+        {
+          "from": "_LAYERTYPE_THREE",
+          "to": "LAYERTYPE_THREE",
+          "description": "三层纹理"
+        },
+        {
+          "from": "_USEDISTORT0_ON",
+          "to": "USEDISTORT0",
+          "description": "使用扭曲0"
+        },
+        {
+          "from": "_USEDISSOLVE_ON",
+          "to": "USEDISSOLVE",
+          "description": "使用溶解"
+        },
+        {
+          "from": "_USEFADEEDGE_ON",
+          "to": "USEFADEEDGE",
+          "description": "使用淡入淡出边缘"
+        },
+        {
+          "from": "_USERIM_ON",
+          "to": "USERIM",
+          "description": "使用边缘光"
+        },
+        {
+          "from": "_USELIGHTING_ON",
+          "to": "USELIGHTING",
+          "description": "使用光照"
+        },
+        {
+          "from": "_ROTATIONTEX_ON",
+          "to": "ROTATIONTEX",
+          "description": "纹理旋转"
+        },
+        {
+          "from": "_USEPOLAR_ON",
+          "to": "USEPOLAR",
+          "description": "使用极坐标"
+        }
+      ]
+    },
+
+    "custom_functions": []
+  }
+}

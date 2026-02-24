@@ -198,10 +198,69 @@ public class LayaAir3D : EditorWindow
             if (ExportConfig.EnableCustomShaderExport)
             {
                 GUILayout.Space(5);
-                
+
                 // 提示信息
                 EditorGUILayout.HelpBox(LanguageConfig.str_CustomShaderTips, MessageType.Info);
             }
+
+#if ENABLE_PARTICLE_MESH_OPTIMIZATION
+            // ========== 粒子系统Mesh优化设置 ==========
+            GUILayout.Space(10);
+            GUILayout.Label("粒子系统Mesh优化", EditorStyles.boldLabel);
+            GUILayout.Space(5);
+
+            // 显示警告开关
+            ExportConfig.ShowParticleMeshWarning = GUILayout.Toggle(
+                ExportConfig.ShowParticleMeshWarning,
+                "显示粒子Mesh顶点数警告"
+            );
+
+            // 自动简化Mesh开关
+            ExportConfig.AutoSimplifyParticleMesh = GUILayout.Toggle(
+                ExportConfig.AutoSimplifyParticleMesh,
+                "自动简化超限的粒子Mesh"
+            );
+
+            if (ExportConfig.AutoSimplifyParticleMesh)
+            {
+                GUILayout.Space(5);
+
+                EditorGUI.indentLevel++;
+
+                // 简化质量滑块
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("简化质量:", GUILayout.Width(80));
+                ExportConfig.ParticleMeshSimplifyQuality = EditorGUILayout.Slider(
+                    ExportConfig.ParticleMeshSimplifyQuality,
+                    0.1f,
+                    1.0f
+                );
+                GUILayout.Label(string.Format("{0:P0}", ExportConfig.ParticleMeshSimplifyQuality), GUILayout.Width(40));
+                GUILayout.EndHorizontal();
+
+                // 最大顶点数设置
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("顶点数限制:", GUILayout.Width(80));
+                ExportConfig.ParticleMeshMaxVertices = EditorGUILayout.IntSlider(
+                    ExportConfig.ParticleMeshMaxVertices,
+                    10000,
+                    100000
+                );
+                GUILayout.Label(ExportConfig.ParticleMeshMaxVertices.ToString(), GUILayout.Width(60));
+                GUILayout.EndHorizontal();
+
+                EditorGUI.indentLevel--;
+
+                GUILayout.Space(5);
+                EditorGUILayout.HelpBox(
+                    "自动简化功能将在导出时检测粒子系统mesh顶点数，" +
+                    "如果超过限制会自动简化mesh到安全范围。\n" +
+                    "简化质量越高，保留的细节越多，但简化程度越低。\n" +
+                    "建议质量: 0.7",
+                    MessageType.Info
+                );
+            }
+#endif
 
             GUILayout.EndVertical();
             GUILayout.EndHorizontal();
