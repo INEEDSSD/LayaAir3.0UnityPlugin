@@ -1,0 +1,86 @@
+{
+    "_$ver": 1,
+    "_$id": "0f496jod",
+    "_$type": "Sprite3D",
+    "name": "Particle",
+    "transform": {
+        "localPosition": {
+            "_$type": "Vector3",
+            "x": 0.047765374183654785,
+            "y": 0.4922517633822281,
+            "z": 0.3220614902675152
+        }
+    },
+    "_$comp": [
+        {
+            "_$type": "ShurikenParticleRenderer",
+            "lightmapScaleOffset": {
+                "_$type": "Vector4"
+            },
+            "sharedMaterials": [
+                {
+                    "_$uuid": "../internal/DefaultParticleMaterial.lmat",
+                    "_$type": "Material"
+                }
+            ],
+            "_particleSystem": {
+                "_isPlaying": true,
+                "startSizeConstant": 0.5,
+                "startSizeConstantSeparate": {
+                    "_$type": "Vector3",
+                    "x": 1,
+                    "y": 1,
+                    "z": 1
+                },
+                "startSizeConstantMinSeparate": {
+                    "_$type": "Vector3"
+                },
+                "startSizeConstantMaxSeparate": {
+                    "_$type": "Vector3",
+                    "x": 1,
+                    "y": 1,
+                    "z": 1
+                },
+                "startRotationConstantSeparate": {
+                    "_$type": "Vector3"
+                },
+                "startRotationConstantSeparate2": {
+                    "_$type": "Vector3"
+                },
+                "startRotationConstantMinSeparate": {
+                    "_$type": "Vector3"
+                },
+                "startRotationConstantMaxSeparate": {
+                    "_$type": "Vector3"
+                },
+                "startColorConstant": {
+                    "_$type": "Vector4",
+                    "x": 1,
+                    "y": 1,
+                    "z": 1,
+                    "w": 1
+                },
+                "startColorConstantMin": {
+                    "_$type": "Vector4"
+                },
+                "startColorConstantMax": {
+                    "_$type": "Vector4",
+                    "x": 1,
+                    "y": 1,
+                    "z": 1,
+                    "w": 1
+                },
+                "maxParticles": 100,
+                "randomSeed": {
+                    "_$type": "Uint32Array",
+                    "value": [
+                        0
+                    ]
+                },
+                "shape": {
+                    "_$type": "SphereShape"
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,168 @@
+Shader3D Start
+{
+    type:Shader3D
+    name:{{{FileName}}},
+    enableInstancing:true,
+    supportReflectionProbe:true,
+    shaderType:D3,
+    uniformMap:{
+        u_AlphaTestValue: { type: Float, default: 0.5 },
+        u_TilingOffset: { type: Vector4, default: [1, 1, 0, 0] },
+
+        u_DiffuseColor: { type: Color, default: [1, 1, 1, 1] },
+        u_DiffuseTexture: { type: Texture2D, options: { define: "DIFFUSEMAP" } },
+        u_AlbedoIntensity: { type: Float, default: 1.0 },
+
+        u_SpecularColor: { type: Color, default: [1, 1, 1, 1] },
+        u_SpecularTexture: { type: Texture2D, options: { define: "SPECULARMAP" } },
+        u_Shininess: { type: Float, default: 0.078, range: [0.0, 1.0] },
+
+        u_NormalTexture: { type: Texture2D, options: { define: "NORMALMAP" } },
+        u_NormalScale: { type: Float, default: 1.0, range: [0.0, 2.0] },
+    },
+    defines: {
+        ENABLEVERTEXCOLOR: { type: bool, default: false }
+    }
+    shaderPass:[
+        {
+            pipeline:Forward,
+            VS:BlinnPhongVS,
+            FS:BlinnPhongFS
+        }
+    ]
+}
+Shader3D End
+
+
+GLSL Start
+#defineGLSL BlinnPhongVS
+    #define SHADER_NAME {{{FileName}}}
+
+    #include "Math.glsl";
+
+    #include "Scene.glsl";
+    #include "SceneFogInput.glsl";
+
+    #include "Camera.glsl";
+    #include "Sprite3DVertex.glsl";
+
+    #include "VertexCommon.glsl";
+
+    #include "BlinnPhongVertex.glsl";
+
+    void main()
+    {
+        Vertex vertex;
+        getVertexParams(vertex);
+
+        PixelParams pixel;
+        initPixelParams(pixel, vertex);
+
+        gl_Position = getPositionCS(pixel.positionWS);
+
+        gl_Position = remapPositionZ(gl_Position);
+
+    #ifdef FOG
+        FogHandle(gl_Position.z);
+    #endif
+    }
+#endGLSL
+
+#defineGLSL BlinnPhongFS
+    #define SHADER_NAME {{{FileName}}}
+
+    #include "Color.glsl";
+
+    #include "Scene.glsl";
+    #include "SceneFog.glsl";
+
+    #include "Camera.glsl";
+    #include "Sprite3DFrag.glsl";
+
+    #include "BlinnPhongFrag.glsl";
+
+    void getBinnPhongSurfaceParams(inout Surface surface, in PixelParams pixel)
+    {
+    #ifdef UV
+        vec2 uv = transformUV(pixel.uv0, u_TilingOffset);
+    #else // UV
+        vec2 uv = vec2(0.0);
+    #endif // UV
+
+    surface.diffuseColor = u_DiffuseColor.rgb;
+    surface.alpha = u_DiffuseColor.a;
+
+    #ifdef COLOR
+        #ifdef ENABLEVERTEXCOLOR
+        surface.diffuseColor *= pixel.vertexColor.xyz;
+        surface.alpha *= pixel.vertexColor.a;
+        #endif // ENABLEVERTEXCOLOR
+    #endif // COLOR
+        
+    #ifdef DIFFUSEMAP
+        vec4 diffuseSampler = texture2D(u_DiffuseTexture, uv);
+        #ifdef Gamma_u_AlbedoTexture
+        diffuseSampler = gammaToLinear(diffuseSampler);
+        #endif // Gamma_u_AlbedoTexture
+        surface.diffuseColor *= diffuseSampler.rgb;
+        surface.alpha *= diffuseSampler.a;
+    #endif // DIFFUSEMAP
+
+        surface.diffuseColor *= u_AlbedoIntensity;
+
+        surface.normalTS = vec3(0.0, 0.0, 1.0);
+    #ifdef NORMALMAP
+        vec3 normalSampler = texture2D(u_NormalTexture, uv).rgb;
+        normalSampler = normalize(normalSampler * 2.0 - 1.0);
+        normalSampler.y *= -1.0;
+        surface.normalTS = normalScale(normalSampler, u_NormalScale);
+    #endif // NORMALMAP
+
+        surface.specularColor = u_SpecularColor.rgb;
+        surface.shininess = u_Shininess;
+
+    #ifdef SPECULARMAP
+        vec4 specularSampler = texture2D(u_SpecularTexture, uv);
+        #ifdef Gamma_u_SpecularTexture
+        specularSampler = gammaToLinear(specularSampler);
+        #endif // Gamma_u_SpecularTexture
+        surface.gloss = specularSampler.rgb;
+    #else // SPECULARMAP
+        #ifdef DIFFUSEMAP
+        surface.gloss = vec3(diffuseSampler.a);
+        #else // DIFFUSEMAP
+        surface.gloss = vec3(1.0, 1.0, 1.0);
+        #endif // DIFFUSEMAP
+    #endif // SPECULARMAP
+    }
+
+    void main()
+    {
+        PixelParams pixel;
+        getPixelParams(pixel);
+
+        Surface surface;
+        getBinnPhongSurfaceParams(surface, pixel);
+
+    #ifdef ALPHATEST
+        if (surface.alpha < u_AlphaTestValue)
+        {
+            discard;
+        }
+    #endif // ALPHATEST
+
+        vec3 surfaceColor = vec3(0.0);
+
+        surfaceColor = BlinnPhongLighting(surface, pixel);
+
+    #ifdef FOG
+        surfaceColor = sceneLitFog(surfaceColor);
+    #endif // FOG
+
+        gl_FragColor = vec4(surfaceColor, surface.alpha);
+
+        gl_FragColor = outputTransform(gl_FragColor);
+    }
+#endGLSL
+
+GLSL End

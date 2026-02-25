@@ -1,0 +1,223 @@
+--- Artist_Effect_Effect_FullEffect.shader	2026-02-13 17:00:51.757435900 +0800
++++ Artist_Effect_Effect_FullEffect_export.shader	2026-02-24 16:36:21.745025300 +0800
+@@ -1,4 +1,4 @@
+-Shader3D Start
++﻿Shader3D Start
+ {
+     type:Shader3D,
+     name:Artist_Effect_Effect_FullEffect,
+@@ -215,7 +215,6 @@
+ varying vec3 v_Texcoord8;
+ varying vec4 v_Texcoord9;
+ varying vec2 v_TextureCoordinate;
+-
+ #ifdef RENDERMODE_MESH
+ varying vec4 v_MeshColor;
+ #endif
+@@ -429,63 +428,56 @@
+         if (normalizedAge < 1.0)
+         {
+ #ifdef RENDERMODE_MESH
+-        // ===== Mesh Rendering Mode =====
+-        // Calculate particle center position first
+-        vec3 startVelocity = a_DirectionTime.xyz * a_StartSpeed;
++            // ===== Mesh Rendering Mode =====
++            // Calculate particle center position first
++            vec3 startVelocity = a_DirectionTime.xyz * a_StartSpeed;
+ 
+ #if defined(VELOCITYOVERLIFETIMECONSTANT) || defined(VELOCITYOVERLIFETIMECURVE) || defined(VELOCITYOVERLIFETIMERANDOMCONSTANT) || defined(VELOCITYOVERLIFETIMERANDOMCURVE)
+-        lifeVelocity = computeParticleLifeVelocity(normalizedAge);
++            lifeVelocity = computeParticleLifeVelocity(normalizedAge);
+ #endif
+ 
+-        vec3 gravityVelocity = u_Gravity * age;
+-        vec4 worldRotation;
++            vec3 gravityVelocity = u_Gravity * age;
++            vec4 worldRotation;
+ 
+-        if (u_SimulationSpace == 0)
++            if (u_SimulationSpace == 0)
+             worldRotation = a_SimulationWorldRotation;
+-        else
++            else
+             worldRotation = u_WorldRotation;
+ 
+-        vec3 dragData = a_DirectionTime.xyz * mix(u_DragConstanct.x, u_DragConstanct.y, a_Random0.x);
+-        vec3 center = computeParticlePosition(startVelocity, lifeVelocity, age, normalizedAge, gravityVelocity, worldRotation, dragData);
++            vec3 dragData = a_DirectionTime.xyz * mix(u_DragConstanct.x, u_DragConstanct.y, a_Random0.x);
++            vec3 center = computeParticlePosition(startVelocity, lifeVelocity, age, normalizedAge, gravityVelocity, worldRotation, dragData);
+ 
+-        // Apply mesh vertex with size scaling and rotation
+-        vec3 size = computeParticleSizeMesh(a_StartSize, normalizedAge);
++            // Apply mesh vertex with size scaling and rotation
++            vec3 size = computeParticleSizeMesh(a_StartSize, normalizedAge);
+ 
+-        // Apply rotation to mesh vertex
+-        // Simplified version: apply rotation around Z axis
+-        float rotZ = a_StartRotation0.x;
+-        float c = cos(rotZ);
+-        float s = sin(rotZ);
+-        vec3 rotatedMeshPos = vec3(
+-            a_MeshPosition.x * c - a_MeshPosition.y * s,
+-            a_MeshPosition.x * s + a_MeshPosition.y * c,
+-            a_MeshPosition.z
+-        );
+-
+-        // Scale and add to center
+-        center += rotationByQuaternions(u_SizeScale * rotatedMeshPos * size, worldRotation);
+-
+-        // Transform to clip space
+-        gl_Position = u_Projection * u_View * vec4(center, 1.0);
+-
+-        // Pass mesh color through separate varying
+-        v_MeshColor = a_MeshColor;
+-
+-        // Particle color for additional effects
+-        vec4 startcolor = gammaToLinear(a_StartColor);
+-        v_Color = computeParticleColor(startcolor, normalizedAge);
+-
+-        // UV calculation for mesh mode
+-        vec2 simulateUV = a_SimulationUV.xy + a_MeshTextureCoordinate * a_SimulationUV.zw;
+-        v_TextureCoordinate = computeParticleUV(simulateUV, normalizedAge);
++            // Apply rotation based on particle system settings
++            // Use rotationByAxis for 2D rotation (simpler, compatible with most use cases)
++            if (u_SimulationSpace == 0)
++            center += u_SizeScale * rotationByAxis(a_MeshPosition * size, vec3(0.0, -1.0, 0.0), a_StartRotation0.x);
++            else if (u_SimulationSpace == 1)
++            center += rotationByQuaternions(u_SizeScale * rotationByAxis(a_MeshPosition * size, vec3(0.0, -1.0, 0.0), a_StartRotation0.x), worldRotation);
+ 
+-        // Screen position
+-        v_ScreenPos.xy = (gl_Position.xy + gl_Position.w) * 0.5;
+-        v_ScreenPos.zw = gl_Position.zw;
++            // Transform to clip space
++            gl_Position = u_Projection * u_View * vec4(center, 1.0);
++
++            // Pass mesh color through separate varying
++            v_MeshColor = a_MeshColor;
++
++            // Particle color for additional effects
++            vec4 startcolor = gammaToLinear(a_StartColor);
++            v_Color = computeParticleColor(startcolor, normalizedAge);
++
++            // UV calculation for mesh mode
++            vec2 simulateUV = a_SimulationUV.xy + a_MeshTextureCoordinate * a_SimulationUV.zw;
++            v_TextureCoordinate = computeParticleUV(simulateUV, normalizedAge);
++
++            // Screen position
++            v_ScreenPos.xy = (gl_Position.xy + gl_Position.w) * 0.5;
++            v_ScreenPos.zw = gl_Position.zw;
+ 
+ #else
+-        // ===== Billboard Particle Mode =====
+-        vec3 startVelocity = a_DirectionTime.xyz * a_StartSpeed;
++            // ===== Billboard Particle Mode =====
++            vec3 startVelocity = a_DirectionTime.xyz * a_StartSpeed;
+ 
+ #if defined(VELOCITYOVERLIFETIMECONSTANT) || defined(VELOCITYOVERLIFETIMECURVE) || defined(VELOCITYOVERLIFETIMERANDOMCONSTANT) || defined(VELOCITYOVERLIFETIMERANDOMCURVE)
+             lifeVelocity = computeParticleLifeVelocity(normalizedAge);
+@@ -510,8 +502,7 @@
+             corner *= computeParticleSizeBillbard(a_StartSize.xy, normalizedAge);
+             float c = cos(a_StartRotation0.x);
+             float s = sin(a_StartRotation0.x);
+-            // GLSL是列优先，需要调整参数顺序
+-            mat2 rotation = mat2(c, s, -s, c);
++            mat2 rotation = mat2(c, -s, s, c);
+             corner = rotation * corner;
+             center += u_SizeScale.xzy * (corner.x * sideVector + corner.y * upVector);
+ 
+@@ -597,7 +588,6 @@
+     varying vec3 v_Texcoord8;
+     varying vec4 v_Texcoord9;
+     varying vec2 v_TextureCoordinate;
+-
+ #ifdef RENDERMODE_MESH
+     varying vec4 v_MeshColor;
+ #endif
+@@ -624,9 +614,8 @@
+         //  去中心化 + 平移
+         vec2 center = vec2(centerX, centerY);
+         vec2 delta = uv - center + vec2(transX, transY);
+-        // GLSL是列优先，需要调整参数顺序
+-        mat2 rotMat = mat2(c, s, -s, c);
+-        vec2 rotated = rotMat * delta;
++        mat2 rotMat = mat2(c, -s, s, c);
++        vec2 rotated = (delta * rotMat);
+         return rotated + center;
+     }
+ 
+@@ -635,31 +624,15 @@
+         vec2 delta = uv - center + vec2(transX, transY);
+ 
+         // 仅仅是 4 次乘法和 2 次加法
+-        // GLSL是列优先，需要调整参数顺序
+-        mat2 rotMat = mat2(c, s, -s, c);
+-        vec2 rotated = rotMat * delta;
++        mat2 rotMat = mat2(c, -s, s, c);
++        vec2 rotated = (delta * rotMat);
+         return rotated + center;
+     }
+ 
+     void main()
+     {
+-        vec2 screenUV = v_ScreenPos.xy / v_ScreenPos.w;
+-
+-        // ========================================
+-        // 步骤6：可视化扭曲纹理采样
+-        // ========================================
+-#ifdef USEDISTORT0
+-        vec2 distortBaseUV = (u_Distort0UVMode == 0.0) ? v_Texcoord0.xy : screenUV;
+-        vec2 distortUV = v_Texcoord6.xy + (distortBaseUV * u_DistortTex0_ST.xy + u_DistortTex0_ST.zw);
+-        vec4 distortSample = texture2D(u_DistortTex0, distortUV);
+ 
+-        gl_FragColor = vec4(distortSample.xy, 0.0, 1.0);
+-        return;
+-#else
+-        gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+-        return;
+-#endif
+-        // ========================================
++        vec2 screenUV = v_ScreenPos.xy / v_ScreenPos.w;
+ 
+ #ifdef USEPOLAR
+         v_Texcoord0.xy = PolarCoordinates(v_Texcoord0.xy,u_PolarControl.xy,u_PolarControl.z,u_PolarControl.w);
+@@ -788,7 +761,7 @@
+         vec3 effectMainLightDir = normalize(u_EffectMainLightDir);
+         float snl = dot(normalWorld, effectMainLightDir);
+         float w = fwidth(snl) * 2.0;
+-        vec3 spec = mix(vec3(0.0), vec3(1.0), smoothstep(-w, w * 2.0, snl + u_EffectMainLightDir.w - 1.0)) * step(0.0001, u_EffectMainLightDir.w);
++        vec3 spec = mix(0.0, 1.0, smoothstep(-w, w * 2.0, snl + u_EffectMainLightDir.w - 1.0)) * step(0.0001, u_EffectMainLightDir.w);
+         color.rgb *= spec * u_EffectMainLightIntensity * u_EffectMainLightColor * max((u_EffectSSSColor + snl) / (u_EffectSSSColor + 1.0), 0.0) + u_EffectAmbientLightColor;
+ 
+ #endif
+@@ -803,7 +776,7 @@
+         normalMapVal.xy = (normalMapVal * 2.0 - 1.0) * u_NormalMapStrength;
+         normalMapVal.z = sqrt(1.0 - clamp(dot(normalMapVal.xy, normalMapVal.xy), 0.0, 1.0));
+         vec3 normalWorldRim = normalize(normalMapVal.x * tangent + normalMapVal.y * binormal + normalMapVal.z * normal);
+-        vec3 normalView = normalize(mat3(transpose(inverse(u_View))) * normalWorldRim);
++        vec3 normalView = normalize((mat3(transpose); (inverse(u_View)) * normalWorldRim));
+ #else
+         vec3 normalView = normalize(v_Texcoord2);
+ #endif
+@@ -831,17 +804,16 @@
+         else
+         color.xyz += rimCol * rimFactor;
+ #endif
+-
+-#ifdef RENDERMODE_MESH
+-        // In Mesh mode, use mesh vertex color
+-        color *= v_MeshColor;
+-#endif
+-        // Multiply by particle color (for both modes)
+         color *= v_Color;
+         color.rgb *= v_Color.a;
+         color.a = clamp(color.a, 0.0, 1.0);
+         gl_FragColor = color;
+ 
++#ifdef RENDERMODE_MESH
++        // Multiply by mesh vertex color in mesh mode
++        gl_FragColor *= v_MeshColor;
++#endif
++
+ #ifdef FOG
+         gl_FragColor.rgb = scenUnlitFog(gl_FragColor.rgb);
+ #endif
