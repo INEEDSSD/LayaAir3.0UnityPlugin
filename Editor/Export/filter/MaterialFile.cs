@@ -8,18 +8,40 @@ internal class MaterialFile : JsonFile
 {
     private Material m_material;
     private bool m_isBuiltinParticleMaterial = false;
-    
-    public MaterialFile(ResoureMap map, Material material) : base(null,new JSONObject(JSONObject.Type.OBJECT))
+    private HashSet<System.Type> m_rendererTypes = new HashSet<System.Type>();
+    private bool m_isParticleMeshMode = false; // ⭐ Track if particle uses mesh rendering mode
+
+    public MaterialFile(ResoureMap map, Material material, Renderer renderer = null) : base(null,new JSONObject(JSONObject.Type.OBJECT))
     {
         this.resoureMap = map;
         this.m_material = material;
+
+        // Track which type of renderer uses this material
+        if (renderer != null)
+        {
+            m_rendererTypes.Add(renderer.GetType());
+
+            // ⭐ Check if this is a ParticleSystemRenderer in mesh mode
+            ParticleSystemRenderer particleRenderer = renderer as ParticleSystemRenderer;
+            if (particleRenderer != null)
+            {
+                ParticleSystemRenderMode renderMode = particleRenderer.renderMode;
+                if (renderMode == ParticleSystemRenderMode.Mesh)
+                {
+                    m_isParticleMeshMode = true;
+                    ExportLogger.Log($"LayaAir3D: Particle system '{renderer.gameObject.name}' uses MESH render mode");
+                }
+            }
+        }
         
         // 检查是否是内置粒子材质
         string materialPath = AssetDatabase.GetAssetPath(material.GetInstanceID());
         bool isBuiltinResource = ResoureMap.IsBuiltinResource(materialPath);
         bool isParticleMaterial = IsParticleShader(material.shader.name);
-        
-        if (isBuiltinResource && isParticleMaterial)
+        bool isUsedByParticle = renderer is ParticleSystemRenderer;
+
+        // 内置资源 + (粒子shader 或 粒子渲染器使用) → 导出为Laya粒子材质
+        if (isBuiltinResource && (isParticleMaterial || isUsedByParticle))
         {
             // 内置粒子材质使用模板
             m_isBuiltinParticleMaterial = true;
@@ -35,23 +57,71 @@ internal class MaterialFile : JsonFile
             }
             else
             {
-                MetarialUitls.WriteMetarial(material, this.jsonData, map);
+                MetarialUitls.WriteMetarial(material, this.jsonData, map, this);
             }
         }
     }
-    
+
     /// <summary>
-    /// 检查是否是粒子相关的 Shader
+    /// Add a renderer type that uses this material (called when material is reused)
+    /// </summary>
+    public void AddRendererUsage(Renderer renderer)
+    {
+        if (renderer != null)
+        {
+            m_rendererTypes.Add(renderer.GetType());
+
+            // ⭐ Check if this is a ParticleSystemRenderer in mesh mode
+            ParticleSystemRenderer particleRenderer = renderer as ParticleSystemRenderer;
+            if (particleRenderer != null)
+            {
+                ParticleSystemRenderMode renderMode = particleRenderer.renderMode;
+                if (renderMode == ParticleSystemRenderMode.Mesh)
+                {
+                    m_isParticleMeshMode = true;
+                    ExportLogger.Log($"LayaAir3D: Particle system '{renderer.gameObject.name}' uses MESH render mode");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Check if this material is used by ParticleSystemRenderer
+    /// </summary>
+    public bool IsUsedByParticleSystem()
+    {
+        return m_rendererTypes.Contains(typeof(ParticleSystemRenderer));
+    }
+
+    /// <summary>
+    /// Check if this material is used by MeshRenderer or SkinnedMeshRenderer
+    /// </summary>
+    public bool IsUsedByMeshRenderer()
+    {
+        return m_rendererTypes.Contains(typeof(MeshRenderer)) ||
+               m_rendererTypes.Contains(typeof(SkinnedMeshRenderer));
+    }
+
+    /// <summary>
+    /// ⭐ Check if this material is used by ParticleSystemRenderer in MESH rendering mode
+    /// </summary>
+    public bool IsParticleMeshMode()
+    {
+        return m_isParticleMeshMode;
+    }
+
+    /// <summary>
+    /// 检查是否是 Unity 内置粒子 Shader
+    /// 仅用于内置材质检测，所有 Unity 内置粒子 shader 名称都包含 "particle"
+    /// 例如: "Particles/Standard Unlit", "Mobile/Particles/Additive",
+    ///       "Legacy Shaders/Particles/Alpha Blended", "Universal Render Pipeline/Particles/*"
     /// </summary>
     private static bool IsParticleShader(string shaderName)
     {
         if (string.IsNullOrEmpty(shaderName))
             return false;
-            
-        string lowerName = shaderName.ToLower();
-        return lowerName.Contains("particle") || 
-               lowerName.Contains("additive") ||
-               lowerName.Contains("alpha blended");
+
+        return shaderName.ToLower().Contains("particle");
     }
     
     /// <summary>
@@ -67,24 +137,21 @@ internal class MaterialFile : JsonFile
         JSONObject props = new JSONObject(JSONObject.Type.OBJECT);
         jsonData.AddField("props", props);
         
-        // 纹理数组 - 内置材质通常没有可导出的纹理，添加空占位符
+        // 纹理数组 - 内置材质通常没有可导出的纹理，保持空数组（shader uniformMap 会使用 "white" 默认值）
         JSONObject textures = new JSONObject(JSONObject.Type.ARRAY);
-        JSONObject emptyTexture = new JSONObject(JSONObject.Type.OBJECT);
-        emptyTexture.AddField("name", "u_texture");
-        textures.Add(emptyTexture);
         props.AddField("textures", textures);
-        
-        // 材质类型
+
+        // 使用 Laya 内置粒子材质类型
         props.AddField("type", "PARTICLESHURIKEN");
         
         // 渲染队列
         props.AddField("renderQueue", material.renderQueue > 0 ? material.renderQueue : 3000);
         
-        // 材质渲染模式 - 2=透明/Additive
-        props.AddField("materialRenderMode", 2);
+        // 材质渲染模式 - 通过混合因子自动区分 Additive(3) / AlphaBlend(2)
+        props.AddField("materialRenderMode", PropDatasConfig.DetectTransparentRenderMode(material));
         
-        // 剔除模式
-        int cullMode = 2;
+        // 剔除模式 - 粒子默认双面 (0=Off, 1=Front, 2=Back)
+        int cullMode = 0; // 默认 Off
         if (material.HasProperty("_Cull"))
         {
             cullMode = material.GetInt("_Cull");
@@ -155,10 +222,18 @@ internal class MaterialFile : JsonFile
         colorValue.Add(tintColor.b);
         colorValue.Add(tintColor.a);
         props.AddField("u_Tintcolor", colorValue);
-        
+
         // Defines
         JSONObject defines = new JSONObject(JSONObject.Type.ARRAY);
         defines.Add("TINTCOLOR");
+
+        // ⭐ Add RENDERMODE_MESH define for particle mesh rendering mode
+        if (m_isParticleMeshMode)
+        {
+            defines.Add("RENDERMODE_MESH");
+            ExportLogger.Log($"LayaAir3D: Added RENDERMODE_MESH define for built-in particle material in mesh mode");
+        }
+
         props.AddField("defines", defines);
     }
     
@@ -169,17 +244,17 @@ internal class MaterialFile : JsonFile
     {
         switch (unityBlend)
         {
-            case 0: return 0;  // Zero
-            case 1: return 1;  // One
-            case 2: return 4;  // DstColor
-            case 3: return 2;  // SrcColor
-            case 4: return 5;  // OneMinusDstColor
-            case 5: return 6;  // SrcAlpha
-            case 6: return 3;  // OneMinusSrcColor
-            case 7: return 8;  // DstAlpha
-            case 8: return 9;  // OneMinusDstAlpha
-            case 9: return 6;  // SrcAlphaSaturate -> SrcAlpha
-            case 10: return 7; // OneMinusSrcAlpha
+            case 0: return 0;  // Zero -> Zero
+            case 1: return 1;  // One -> One
+            case 2: return 4;  // DstColor -> DstColor
+            case 3: return 2;  // SrcColor -> SrcColor
+            case 4: return 5;  // OneMinusDstColor -> OneMinusDstColor
+            case 5: return 6;  // SrcAlpha -> SrcAlpha
+            case 6: return 7;  // OneMinusSrcAlpha -> OneMinusSrcAlpha [FIXED: was 3]
+            case 7: return 8;  // DstAlpha -> DstAlpha
+            case 8: return 9;  // OneMinusDstAlpha -> OneMinusDstAlpha
+            case 9: return 6;  // SrcAlphaSaturate -> SrcAlpha (近似)
+            case 10: return 3; // OneMinusSrcColor -> OneMinusSrcColor [FIXED: was 7]
             default: return 1;
         }
     }

@@ -640,7 +640,7 @@ public class MeshUitls
 
 
         //vertexBuffer[vertexBuffer.Count - 1].boneIndex[2] = 7;
-        //Debug.Log(vertexBuffer[vertexBuffer.Count - 1].boneIndex);
+        //ExportLogger.Log(vertexBuffer[vertexBuffer.Count - 1].boneIndex);
 
         long VerionSize = 0;
 

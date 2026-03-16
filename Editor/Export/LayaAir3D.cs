@@ -12,6 +12,8 @@ public class LayaAir3D : EditorWindow
     private static bool GameObjectSetting;
     public static bool MeshSetting;
     private static bool OtherSetting;
+    private static bool CustomShaderSetting;
+    private static bool ComponentScriptSetting; // 组件脚本UUID映射配置
 
     public static bool Scenes;
     public static int sceneIndex;
@@ -166,10 +168,145 @@ public class LayaAir3D : EditorWindow
             if (ExportConfig.CustomizeDirectory)
                 ExportConfig.CustomizeDirectoryName = GUILayout.TextField(ExportConfig.CustomizeDirectoryName);
             GUILayout.EndHorizontal();
+
+            // 调试日志开关
+            ExportConfig.EnableDebugLog = GUILayout.Toggle(ExportConfig.EnableDebugLog, "启用调试日志（Enable Debug Logs）");
+
             GUILayout.EndVertical();
             GUILayout.EndHorizontal();
         }
 
+
+        //??
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(21);
+        GUILayout.Box("", GUILayout.Height(1), GUILayout.Width(position.width - 60));
+        GUILayout.EndHorizontal();
+
+        //---------------------------------------CustomShaderSetting------------------------------------------
+        GUILayout.Space(10);
+
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(21);
+        CustomShaderSetting = EditorGUILayout.Foldout(CustomShaderSetting, LanguageConfig.str_CustomShaderSetting, true);
+        GUILayout.EndHorizontal();
+        if (CustomShaderSetting)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Space(21);
+            GUILayout.Label("", GUILayout.Width(15));
+            GUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+
+            // 启用自定义Shader导出（自动转换未配置的Shader）
+            ExportConfig.EnableCustomShaderExport = GUILayout.Toggle(ExportConfig.EnableCustomShaderExport, LanguageConfig.str_EnableCustomShaderExport);
+            
+            if (ExportConfig.EnableCustomShaderExport)
+            {
+                GUILayout.Space(5);
+
+                // 提示信息
+                EditorGUILayout.HelpBox(LanguageConfig.str_CustomShaderTips, MessageType.Info);
+            }
+
+#if ENABLE_PARTICLE_MESH_OPTIMIZATION
+            // ========== 粒子系统Mesh优化设置 ==========
+            GUILayout.Space(10);
+            GUILayout.Label("粒子系统Mesh优化", EditorStyles.boldLabel);
+            GUILayout.Space(5);
+
+            // 显示警告开关
+            ExportConfig.ShowParticleMeshWarning = GUILayout.Toggle(
+                ExportConfig.ShowParticleMeshWarning,
+                "显示粒子Mesh顶点数警告"
+            );
+
+            // 自动简化Mesh开关
+            ExportConfig.AutoSimplifyParticleMesh = GUILayout.Toggle(
+                ExportConfig.AutoSimplifyParticleMesh,
+                "自动简化超限的粒子Mesh"
+            );
+
+            if (ExportConfig.AutoSimplifyParticleMesh)
+            {
+                GUILayout.Space(5);
+
+                EditorGUI.indentLevel++;
+
+                // 简化质量滑块
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("简化质量:", GUILayout.Width(80));
+                ExportConfig.ParticleMeshSimplifyQuality = EditorGUILayout.Slider(
+                    ExportConfig.ParticleMeshSimplifyQuality,
+                    0.1f,
+                    1.0f
+                );
+                GUILayout.Label(string.Format("{0:P0}", ExportConfig.ParticleMeshSimplifyQuality), GUILayout.Width(40));
+                GUILayout.EndHorizontal();
+
+                // 最大顶点数设置
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("顶点数限制:", GUILayout.Width(80));
+                ExportConfig.ParticleMeshMaxVertices = EditorGUILayout.IntSlider(
+                    ExportConfig.ParticleMeshMaxVertices,
+                    10000,
+                    100000
+                );
+                GUILayout.Label(ExportConfig.ParticleMeshMaxVertices.ToString(), GUILayout.Width(60));
+                GUILayout.EndHorizontal();
+
+                EditorGUI.indentLevel--;
+
+                GUILayout.Space(5);
+                EditorGUILayout.HelpBox(
+                    "自动简化功能将在导出时检测粒子系统mesh顶点数，" +
+                    "如果超过限制会自动简化mesh到安全范围。\n" +
+                    "简化质量越高，保留的细节越多，但简化程度越低。\n" +
+                    "建议质量: 0.7",
+                    MessageType.Info
+                );
+            }
+#endif
+
+            GUILayout.EndVertical();
+            GUILayout.EndHorizontal();
+        }
+
+        //??
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(21);
+        GUILayout.Box("", GUILayout.Height(1), GUILayout.Width(position.width - 60));
+        GUILayout.EndHorizontal();
+
+        //---------------------------------------ComponentScriptSetting------------------------------------------
+        GUILayout.Space(10);
+        GUILayout.BeginHorizontal();
+        GUILayout.Space(21);
+        ComponentScriptSetting = EditorGUILayout.Foldout(ComponentScriptSetting, "组件脚本导出配置", true);
+        GUILayout.EndHorizontal();
+
+        if (ComponentScriptSetting)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Space(21);
+            GUILayout.BeginVertical();
+
+            EditorGUILayout.HelpBox(
+                "当Unity动画控制自定义组件属性时，需要配置组件类型名到LayaAir脚本UUID的映射。\n" +
+                "UUID可以在LayaAir项目的 src/xxx.ts.meta 文件中找到。",
+                MessageType.Info
+            );
+
+            GUILayout.Space(5);
+
+            if (GUILayout.Button("打开组件UUID映射配置面板", GUILayout.Height(30)))
+            {
+                // 通过反射安全地打开窗口，避免编译依赖
+                OpenComponentMappingWindow();
+            }
+
+            GUILayout.EndVertical();
+            GUILayout.EndHorizontal();
+        }
 
         //??
         GUILayout.BeginHorizontal();
@@ -219,9 +356,8 @@ public class LayaAir3D : EditorWindow
         {
             try {
                 LayaAir3Export.ExportScene();
-            } catch(Exception) {
-                Debug.LogError(LanguageConfig.str_ExportFailed);
-                throw;
+            } catch(Exception e) {
+                Debug.LogError(LanguageConfig.str_ExportFailed + "\n" + e.Message + "\n" + e.StackTrace);
             }
         }
         GUILayout.EndHorizontal();
@@ -229,6 +365,20 @@ public class LayaAir3D : EditorWindow
         GUILayout.Space(30);
         ExportConfig.saveConfiguration();
 
+    }
+
+    /// <summary>
+    /// 打开组件UUID映射配置窗口
+    /// </summary>
+    private static void OpenComponentMappingWindow()
+    {
+        // 直接调用Unity菜单命令（最可靠的方式）
+        bool success = EditorApplication.ExecuteMenuItem("LayaAir/组件脚本导出配置");
+
+        if (!success)
+        {
+            Debug.LogError("无法打开配置面板。请确认Unity Console中是否有编译错误。");
+        }
     }
 
 }

@@ -16,7 +16,8 @@ public enum KeyFrameValueType
     Vector2 = 5,
     Vector3 = 6,
     Vector4 = 7,
-    Color = 8
+    Color = 8,
+    MaterialSwap = 11   // Material reference swap keyframe (LAYAANIMATION:WEIGHT_05)
 }
 
 
@@ -26,6 +27,26 @@ public class FrameInfo
     public float time;
     public int oriderIndex;
     public uint frameIndex;
+}
+
+// Material swap keyframe (file path reference, WEIGHT_05 format)
+public struct MaterialSwapFrameData
+{
+    public UInt16 startTimeIndex;
+    public string materialPath;  // "res://..." path to the .lmat file
+}
+
+// Animation node for material reference swap (type = 11)
+public struct MaterialSwapNodeData
+{
+    public Byte type;                          // always KeyFrameValueType.MaterialSwap = 11
+    public UInt16 pathLength;
+    public List<UInt16> pathIndex;
+    public UInt16 componentTypeIndex;          // index of "MeshRenderer" or "SkinnedMeshRenderer"
+    public UInt16 propertyNameLength;          // always 2: ["sharedMaterials", slotIndex]
+    public List<UInt16> propertyNameIndex;
+    public UInt16 keyFrameCount;
+    public List<MaterialSwapFrameData> keyFrames;
 }
 
 //动画帧信息
@@ -91,7 +112,7 @@ public class FrameData
         if (index < 0)
         {
             FileUtil.setStatuse(false);
-            Debug.LogError("not get the prop : " + key);
+            Debug.LogError($"[LayaAir Export] FrameData.setValue: property '{key}' not found in props list");
         }
         this.inTangentNumbers[index] = value.inTangent;
         this.outTangentNumbers[index] = value.outTangent;
@@ -130,7 +151,7 @@ class CustomClipCurveData
             }
             else
             {
-                Debug.Log("zhen" + frameIndex.ToString());
+                ExportLogger.Log($"[LayaAir Export] Duplicate keyframe at frame index {frameIndex}, skipping");
             }
         }
     }
@@ -141,7 +162,7 @@ class CustomClipCurveData
         Keyframe keyframe;
         if (!this.m_keyMap.TryGetValue(frameIndex, out keyframe))
         {
-            Debug.LogError("插入帧错误；请查找bug");
+            Debug.LogError($"[LayaAir Export] Keyframe not found at frame index {frameIndex} (time={time})");
         }
         return keyframe;
     }
@@ -219,7 +240,7 @@ class CustomClipCurveData
 public class AnimationCurveGroup
 {
     public static uint FPS = 1000;
-    private delegate void FrameDelegate(FrameData frame, ref AniNodeFrameData data, bool isRotate);
+    private delegate void FrameDelegate(FrameData frame, ref AniNodeFrameData data, bool isRotate, bool parentIsCamOrLight);
     private static Dictionary<KeyFrameValueType, List<string>> keyFrameConfigs;
     public static void init()
     {
@@ -262,15 +283,20 @@ public class AnimationCurveGroup
     private List<string> _propnames;
     private Type _type;
     private string _propertyName;
+    private string _basePropertyPath;  // full path without trailing single-char component suffix
     private string _conpomentType;
+    private KeyFrameValueType? _outputTypeOverride;  // 覆盖序列化时的type字节
     private GameObject _gameobject;
     private Dictionary<float, FrameData> datas;
     private Dictionary<uint, float> _timeLists;
     private bool iscameraOrLight;
+    private bool parentIsCameraOrLight;
     public AnimationCurveGroup(string path, GameObject gameObject, Type type, string conpomentType, string propertyName, KeyFrameValueType keyType)
     {
         this._curveList = new Dictionary<string, CustomClipCurveData>();
         this.iscameraOrLight = GameObjectUitls.isCameraOrLight(gameObject);
+        this.parentIsCameraOrLight = gameObject.transform.parent != null &&
+            GameObjectUitls.isCameraOrLight(gameObject.transform.parent.gameObject);
         this._path = path;
         this._gameobject = gameObject;
         this._keyType = keyType;
@@ -278,6 +304,17 @@ public class AnimationCurveGroup
         this._propnames = new List<string>();
         this._type = type;
         this._propertyName = propertyName.Split('.')[0];
+        // Compute base property path: strips trailing single-char component suffix (.r .g .b .a .x .y .z .w)
+        // e.g. "material._Color.r" → "material._Color",  "m_LocalPosition.x" → "m_LocalPosition"
+        string basePropPath = propertyName;
+        int bLastDot = basePropPath.LastIndexOf('.');
+        if (bLastDot >= 0)
+        {
+            string bSuffix = basePropPath.Substring(bLastDot + 1);
+            if (bSuffix.Length == 1 && "rgbaxyzw".IndexOf(bSuffix[0]) >= 0)
+                basePropPath = basePropPath.Substring(0, bLastDot);
+        }
+        this._basePropertyPath = basePropPath;
         this._timeLists = new Dictionary<uint, float>();
         this.datas = new Dictionary<float, FrameData>();
     }
@@ -303,6 +340,11 @@ public class AnimationCurveGroup
         {
             return this._keyType;
         }
+    }
+
+    public void SetOutputTypeOverride(KeyFrameValueType type)
+    {
+        _outputTypeOverride = type;
     }
 
     public bool pushCurve(AnimationClipCurveData curveData)
@@ -371,7 +413,7 @@ public class AnimationCurveGroup
         if (!AnimationCurveGroup.keyFrameConfigs.TryGetValue(this._keyType, out props))
         {
             FileUtil.setStatuse(false);
-            Debug.LogError("Not get the Key Value Type" + this._keyType);
+            Debug.LogError($"[LayaAir Export] Unsupported KeyFrameValueType: {this._keyType}");
             return false;
         }
         foreach (string key in props)
@@ -381,10 +423,14 @@ public class AnimationCurveGroup
             {
                 EditorCurveBinding binding = new EditorCurveBinding();
                 binding.path = this._path.Split('.')[0];
-                binding.propertyName = this._propertyName + "." + key;
+                binding.propertyName = this._basePropertyPath + "." + key;
                 binding.type = this._type;
-                float data = 0.0f;
-                AnimationUtility.GetFloatValue(this._gameobject, binding, out data);
+                // 尝试从 GameObject 读取当前值；失败时 Color.a 默认 1.0（不透明），其余默认 0.0
+                float data;
+                if (!AnimationUtility.GetFloatValue(this._gameobject, binding, out data))
+                {
+                    data = (this._keyType == KeyFrameValueType.Color && key == "a") ? 1.0f : 0.0f;
+                }
                 AnimationClipCurveData curveData = new AnimationClipCurveData(binding);
                 AnimationCurve curve = curveData.curve = new AnimationCurve();
                 curve.AddKey(start, data);
@@ -427,10 +473,10 @@ public class AnimationCurveGroup
         if (!AnimationCurveGroup.keyFrameConfigs.TryGetValue(this._keyType, out props))
         {
             FileUtil.setStatuse(false);
-            Debug.LogError("not get the Key Value Type" + this._keyType);
+            Debug.LogError($"[LayaAir Export] Unsupported KeyFrameValueType: {this._keyType}");
             return;
         }
-        aniNodeData.type = (Byte)this._keyType;
+        aniNodeData.type = (Byte)(this._outputTypeOverride ?? this._keyType);
         List<UInt16> pathIndex = new List<UInt16>();
         String nodePath = this._path;
         string[] strArr = nodePath.Split('/');
@@ -497,36 +543,64 @@ public class AnimationCurveGroup
                 Debug.LogError("not get the frameIndex by time:" + frame.floatTime.ToString());
             }
 
-            frameDelegate(frame, ref data, this.iscameraOrLight);
+            frameDelegate(frame, ref data, this.iscameraOrLight, this.parentIsCameraOrLight);
             aniNodeFrameDatas.Add(data);
         }
     }
 
-    private static void writePosition(FrameData frame, ref AniNodeFrameData data, bool isRotate)
+    private static void writePosition(FrameData frame, ref AniNodeFrameData data, bool isRotate, bool parentIsCamOrLight)
     {
-        SpaceUtils.changePostion(ref frame.valueNumbers);
-        SpaceUtils.changePostion(ref frame.inTangentNumbers);
-        SpaceUtils.changePostion(ref frame.outTangentNumbers);
-        writeValue(frame, ref data, isRotate);
+        if (parentIsCamOrLight)
+        {
+            // 父级是相机/灯光，取反Z而非X来补偿父级的Y180旋转
+            SpaceUtils.changePostionForCameraChild(ref frame.valueNumbers);
+            SpaceUtils.changePostionForCameraChild(ref frame.inTangentNumbers);
+            SpaceUtils.changePostionForCameraChild(ref frame.outTangentNumbers);
+        }
+        else
+        {
+            SpaceUtils.changePostion(ref frame.valueNumbers);
+            SpaceUtils.changePostion(ref frame.inTangentNumbers);
+            SpaceUtils.changePostion(ref frame.outTangentNumbers);
+        }
+        writeValue(frame, ref data, isRotate, parentIsCamOrLight);
     }
 
-    private static void writeRotate(FrameData frame, ref AniNodeFrameData data, bool isRotate)
+    private static void writeRotate(FrameData frame, ref AniNodeFrameData data, bool isRotate, bool parentIsCamOrLight)
     {
         SpaceUtils.changeRotate(ref frame.valueNumbers, isRotate);
         SpaceUtils.changeRotateTangle(ref frame.inTangentNumbers);
         SpaceUtils.changeRotateTangle(ref frame.outTangentNumbers);
-        writeValue(frame, ref data, isRotate);
+        if (parentIsCamOrLight)
+        {
+            // 左乘Y180补偿父级相机/灯光的额外旋转
+            SpaceUtils.compensateCameraParentRotation(ref frame.valueNumbers);
+            SpaceUtils.compensateCameraParentRotation(ref frame.inTangentNumbers);
+            SpaceUtils.compensateCameraParentRotation(ref frame.outTangentNumbers);
+        }
+        writeValue(frame, ref data, isRotate, parentIsCamOrLight);
     }
 
-    private static void writeRotateEuler(FrameData frame, ref AniNodeFrameData data, bool isRotate)
+    private static void writeRotateEuler(FrameData frame, ref AniNodeFrameData data, bool isRotate, bool parentIsCamOrLight)
     {
         SpaceUtils.changeRotateEuler(ref frame.valueNumbers, isRotate);
         SpaceUtils.changeRotateEulerTangent(ref frame.inTangentNumbers, false);
         SpaceUtils.changeRotateEulerTangent(ref frame.outTangentNumbers, false);
-        writeValue(frame, ref data, isRotate);
+        if (parentIsCamOrLight)
+        {
+            // 欧拉角Y180补偿：先转四元数，左乘Y180，再转回欧拉角
+            Quaternion q = Quaternion.Euler(frame.valueNumbers[0], frame.valueNumbers[1], frame.valueNumbers[2]);
+            SpaceUtils.compensateCameraParentRotation(ref q);
+            Vector3 euler = q.eulerAngles;
+            frame.valueNumbers[0] = euler.x;
+            frame.valueNumbers[1] = euler.y;
+            frame.valueNumbers[2] = euler.z;
+            // 注意：欧拉角切线的Y180补偿较复杂，暂不处理
+        }
+        writeValue(frame, ref data, isRotate, parentIsCamOrLight);
     }
 
-    private static void writeValue(FrameData frame, ref AniNodeFrameData data, bool isRotate)
+    private static void writeValue(FrameData frame, ref AniNodeFrameData data, bool isRotate, bool parentIsCamOrLight)
     {
         int maxCount = frame.valueNumbers.Length;
         for (var i = 0; i < maxCount; i++)

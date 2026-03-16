@@ -54,28 +54,134 @@ internal class TextureFile : FileData
     private LayaTextureImportFormat importFormat;
     private bool hasAlphaChannel;
 
-    public TextureFile(string originPath, Texture2D texture, bool isNormal) : base(null) {
-        this.texture = texture;
-        this.isNormal = isNormal;
+    // 导出前保存的原始导入设置，SaveFile 结束后用于还原，确保不污染 Unity 项目资源
+    private string              m_importerPath           = null;
+    private TextureImporterType m_origTextureType        = TextureImporterType.Default;
+    private bool                m_origIsReadable         = false;
+    private bool                m_importSettingsModified = false;
+    // 是否作为 Laya 2D 精灵纹理导出（meta 只含 textureType:2，不生成 3D constructParams）
+    private bool                m_isSpriteTexture        = false;
+
+    public TextureFile(string originPath, Texture2D texture, bool isNormal,
+                       bool isSpriteTexture = false) : base(null) {
+        this.texture          = texture;
+        this.isNormal         = isNormal;
+        this.m_isSpriteTexture = isSpriteTexture;
+        // updatePath 内部会调用 getOutFilePath，后者依赖 hasAlphaChannel 来决定
+        // 输出扩展名（.png 或 .jpg）。但 getTextureInfo 才会准确设置 hasAlphaChannel，
+        // 晚于 updatePath 执行，导致 hasAlphaChannel 始终是默认值 false，所有纹理
+        // 输出路径都被错误地定为 .jpg。
+        // 修复：用源文件扩展名提前预判 alpha，jpg/jpeg 肯定无 alpha，其余按格式判断。
+        if (texture != null) {
+            string srcExt = Path.GetExtension(originPath).ToLower();
+            if (srcExt == ".jpg" || srcExt == ".jpeg") {
+                this.hasAlphaChannel = false;
+            } else {
+                this.hasAlphaChannel = GraphicsFormatUtility.HasAlphaChannel(texture.graphicsFormat);
+            }
+        } else {
+            this.hasAlphaChannel = true; // 保守默认 png
+        }
         this.updatePath(originPath);
         this.getTextureInfo();
+    }
+
+    /// <summary>
+    /// 当无法获取TextureImporter时，使用默认值初始化纹理信息
+    /// </summary>
+    private void initDefaultTextureInfo() {
+        this.importFormat = LayaTextureImportFormat.R8G8B8A8;
+        this.hasAlphaChannel = true;
+        
+        var sRGB = !this.isNormal;
+        WrapMode wrapMode = WrapMode.Clamp;
+        
+        // 默认importer数据
+        JSONObject importData = new JSONObject(JSONObject.Type.OBJECT);
+        importData.AddField("sRGB", sRGB);
+        importData.AddField("wrapMode", (int)wrapMode);
+        importData.AddField("generateMipmap", true);
+        importData.AddField("anisoLevel", 1);
+        importData.AddField("alphaChannel", hasAlphaChannel);
+        
+        JSONObject platformDefault = new JSONObject(JSONObject.Type.OBJECT);
+        platformDefault.AddField("format", (int)this.importFormat);
+        importData.AddField("platformDefault", platformDefault);
+        this.m_metaData.AddField("importer", importData);
+        
+        // constructParams
+        this.constructParams.Add(texture != null ? texture.width : 1);
+        this.constructParams.Add(texture != null ? texture.height : 1);
+        this.constructParams.Add((int)LayaTextureFormat.R8G8B8A8);
+        this.constructParams.Add(true); // mipmap
+        this.constructParams.Add(false); // canRead
+        this.constructParams.Add(sRGB);
+        
+        // propertyParams
+        this.propertyParams.AddField("filterMode", 1);
+        this.propertyParams.AddField("wrapModeU", (int)wrapMode);
+        this.propertyParams.AddField("wrapModeV", (int)wrapMode);
+        this.propertyParams.AddField("anisoLevel", 1);
     }
 
     private void getTextureInfo() {
         this.constructParams = new JSONObject(JSONObject.Type.ARRAY);
         this.propertyParams = new JSONObject(JSONObject.Type.ARRAY);
 
+        // 检查texture是否为空
+        if (texture == null) {
+            FileUtil.setStatuse(false);
+            Debug.LogError(LOGHEAD + "Texture is null, cannot export");
+            initDefaultTextureInfo();
+            return;
+        }
+
         string path = AssetDatabase.GetAssetPath(texture.GetInstanceID());
         TextureImporter import = AssetImporter.GetAtPath(path) as TextureImporter;
         if (import == null) {
             FileUtil.setStatuse(false);
             Debug.LogError(LOGHEAD + path + " can't export   You should check the texture file format");
+            // 使用默认值初始化，避免后续空引用
+            initDefaultTextureInfo();
+            return;
         } else {
-            import.textureType = TextureImporterType.Default;
-            import.isReadable = true;
-            AssetDatabase.ImportAsset(path);
+            // 保存原始导入设置，SaveFile 结束后还原，确保不永久修改 Unity 资源
+            m_importerPath    = path;
+            m_origTextureType = import.textureType;
+            m_origIsReadable  = import.isReadable;
+
+            bool needReimport = false;
+
+            // 只有非 Sprite 类型才改为 Default。
+            // Sprite 类型若改为 Default 会在 ImportAsset 时销毁所有 sprite 子资产，
+            // 导致场景里所有 SpriteRenderer.sprite 引用变成 null。
+            if (import.textureType != TextureImporterType.Sprite &&
+                import.textureType != TextureImporterType.Default) {
+                import.textureType = TextureImporterType.Default;
+                needReimport = true;
+            }
+            if (!import.isReadable) {
+                import.isReadable = true;
+                needReimport = true;
+            }
+            if (needReimport) {
+                m_importSettingsModified = true;
+                AssetDatabase.ImportAsset(path);
+            }
+
+            // ── 精灵纹理快速路径 ──────────────────────────────────────────────
+            // 2D 精灵纹理在 Laya 中只需要 { "textureType": 2 }，不需要 3D 贴图的
+            // constructParams / propertyParams / platformDefault 等参数。
+            if (m_isSpriteTexture) {
+                JSONObject spriteImporter = new JSONObject(JSONObject.Type.OBJECT);
+                spriteImporter.AddField("textureType", 2);
+                this.m_metaData.AddField("importer", spriteImporter);
+                // constructParams / propertyParams 保持空数组（已在方法开头初始化），
+                // 精灵纹理不会被材质系统调用 jsonObject()，无需填充。
+                return;
+            }
         }
-        
+
         var sRGB = true;
         if (this.isNormal || import.textureType == TextureImporterType.NormalMap){
             sRGB = false;
@@ -104,12 +210,10 @@ internal class TextureFile : FileData
             this.hasAlphaChannel = false;
         }
         
-        this.importFormat = LayaTextureImportFormat.R8G8B8A8;
-        if (GraphicsFormatUtility.IsCompressedFormat(format)) {
-            this.importFormat = LayaTextureImportFormat.COMPRESSED;
-        } else if (!this.hasAlphaChannel) {
-            this.importFormat = LayaTextureImportFormat.R8G8B8;
-        }
+        // 始终导出为非压缩格式，避免 Laya 端出现压缩纹理兼容问题
+        this.importFormat = this.hasAlphaChannel
+            ? LayaTextureImportFormat.R8G8B8A8
+            : LayaTextureImportFormat.R8G8B8;
 
         WrapMode wrapMode = WrapMode.Clamp;
         switch (texture.wrapMode) {
@@ -164,13 +268,10 @@ internal class TextureFile : FileData
         if (true) { // constructParams
             this.constructParams.Add(texture.width); // width
             this.constructParams.Add(texture.height); // height
-            // format
-            LayaTextureFormat fmt = LayaTextureFormat.R8G8B8A8;
-            if (importFormat == LayaTextureImportFormat.COMPRESSED) {
-                fmt = LayaTextureFormat.COMPRESSED; // DX5
-            } else if (!hasAlphaChannel) {
-                fmt = LayaTextureFormat.R8G8B8; // RGB
-            }
+            // 格式：始终非压缩，与 importFormat 保持一致
+            LayaTextureFormat fmt = hasAlphaChannel
+                ? LayaTextureFormat.R8G8B8A8
+                : LayaTextureFormat.R8G8B8;
             this.constructParams.Add((int)fmt);
             // mipmap
             this.constructParams.Add(import.mipmapEnabled);
@@ -309,7 +410,7 @@ internal class TextureFile : FileData
         if (this.rgbmEncoding) {
             Color[] pixels = this.texture.GetPixels(0);
             if (QualitySettings.activeColorSpace == ColorSpace.Gamma) {
-                Debug.Log("Current color space is gamma.. Your Img will change to Linear Space");
+                ExportLogger.Log("Current color space is gamma.. Your Img will change to Linear Space");
                 gammaColorsToLinear(pixels);
             }
             this.exportHDRFile(this.outPath, pixels, this.texture.height, this.texture.width);
@@ -325,6 +426,17 @@ internal class TextureFile : FileData
             uncompressedTexture.Apply();
             byte[] bytes = uncompressedTexture.EncodeToJPG();
             File.WriteAllBytes(this.outPath, bytes);
+        }
+
+        // 像素读取完成后，还原导出前修改过的导入设置，不永久污染 Unity 项目资源
+        if (m_importSettingsModified && m_importerPath != null) {
+            TextureImporter importerToRestore = AssetImporter.GetAtPath(m_importerPath) as TextureImporter;
+            if (importerToRestore != null) {
+                importerToRestore.textureType = m_origTextureType;
+                importerToRestore.isReadable  = m_origIsReadable;
+                AssetDatabase.ImportAsset(m_importerPath, ImportAssetOptions.ForceUpdate);
+            }
+            m_importSettingsModified = false;
         }
     }
 }

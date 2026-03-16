@@ -19,6 +19,6 @@ internal class AnimationClipFile : FileData
         base.saveMeta();
         FileStream fs = Util.FileUtil.saveFile(this.outPath);
         string clipName = GameObjectUitls.cleanIllegalChar(this.m_clip.name, true);
-        GameObjectUitls.writeClip(this.m_clip, fs, this.m_root, clipName);
+        GameObjectUitls.writeClip(this.m_clip, fs, this.m_root, clipName, this.resoureMap);
     }
 }

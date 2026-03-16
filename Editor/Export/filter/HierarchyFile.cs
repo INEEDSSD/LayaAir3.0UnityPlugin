@@ -17,7 +17,7 @@ internal class HierarchyFile
         GameObject[] gameObjects = scene.GetRootGameObjects();
         var allNodes = getSceneAllNode(gameObjects);//场景中所有GameObject
         this.resouremap = new ResoureMap();
-        this.nodeMap = this.resouremap.AddNodeMap(2);
+        this.nodeMap = this.resouremap.AddNodeMap(2, sceneMode: true);
        
         foreach (var gameObject in allNodes)//遍历
         {
@@ -116,11 +116,7 @@ internal class HierarchyFile
                     {
                         continue;
                     }
-                    GameObject perfabRoot = PerfabFile.getPrefabInstanceRoot(gameObject);
-                    if (perfabRoot == null||perfabRoot != gameObject)
-                    {
-                        this.resouremap.AddExportFile(new JsonFile(gameObject.name + ".lh", this.nodeMap.getPerfabJson(gameObject)));
-                    }
+                    this.resouremap.AddExportFile(new JsonFile(gameObject.name + ".lh", this.nodeMap.getPerfabJson(gameObject)));
                 }
             }
         }

@@ -29,6 +29,18 @@ public class ExportConfig
     //导出地址
     private static string _SAVEPATH = "Assets";
 
+    //启用自定义Shader导出
+    private static bool _EnableCustomShaderExport = false;
+
+    //粒子系统Mesh顶点限制处理
+    private static bool _AutoSimplifyParticleMesh = false;
+    private static int _ParticleMeshMaxVertices = 65535;
+    private static float _ParticleMeshSimplifyQuality = 0.7f; // 0-1之间，越高质量越好
+    private static bool _ShowParticleMeshWarning = true;
+
+    //启用调试日志输出
+    private static bool _EnableDebugLog = false;
+
     //场景 or 预制体
     public static int FirstlevelMenu
     {
@@ -176,6 +188,89 @@ public class ExportConfig
         }
     }
 
+    //启用自定义Shader导出
+    public static bool EnableCustomShaderExport
+    {
+        get { return _EnableCustomShaderExport; }
+        set
+        {
+            if (_EnableCustomShaderExport != value)
+            {
+                _EnableCustomShaderExport = value;
+                _updateConfig = true;
+            }
+        }
+    }
+
+    //粒子系统Mesh自动简化
+    public static bool AutoSimplifyParticleMesh
+    {
+        get { return _AutoSimplifyParticleMesh; }
+        set
+        {
+            if (_AutoSimplifyParticleMesh != value)
+            {
+                _AutoSimplifyParticleMesh = value;
+                _updateConfig = true;
+            }
+        }
+    }
+
+    //粒子系统总顶点数限制
+    public static int ParticleMeshMaxVertices
+    {
+        get { return _ParticleMeshMaxVertices; }
+        set
+        {
+            if (_ParticleMeshMaxVertices != value)
+            {
+                _ParticleMeshMaxVertices = value;
+                _updateConfig = true;
+            }
+        }
+    }
+
+    //Mesh简化质量 (0-1)
+    public static float ParticleMeshSimplifyQuality
+    {
+        get { return _ParticleMeshSimplifyQuality; }
+        set
+        {
+            if (_ParticleMeshSimplifyQuality != value)
+            {
+                _ParticleMeshSimplifyQuality = Mathf.Clamp01(value);
+                _updateConfig = true;
+            }
+        }
+    }
+
+    //是否显示粒子Mesh警告
+    public static bool ShowParticleMeshWarning
+    {
+        get { return _ShowParticleMeshWarning; }
+        set
+        {
+            if (_ShowParticleMeshWarning != value)
+            {
+                _ShowParticleMeshWarning = value;
+                _updateConfig = true;
+            }
+        }
+    }
+
+    //是否启用调试日志
+    public static bool EnableDebugLog
+    {
+        get { return _EnableDebugLog; }
+        set
+        {
+            if (_EnableDebugLog != value)
+            {
+                _EnableDebugLog = value;
+                _updateConfig = true;
+            }
+        }
+    }
 
     public static string SavePath()
     {
@@ -209,6 +304,28 @@ public class ExportConfig
         CustomizeDirectory = bool.Parse(xn.SelectSingleNode("CustomizeDirectory").InnerText);
         CustomizeDirectoryName = xn.SelectSingleNode("CustomizeDirectoryName").InnerText;
         _SAVEPATH = xn.SelectSingleNode("SavePath").InnerText;
+        
+        // 自定义Shader配置
+        if (xn.SelectSingleNode("EnableCustomShaderExport") != null)
+            EnableCustomShaderExport = bool.Parse(xn.SelectSingleNode("EnableCustomShaderExport").InnerText);
+
+        // 粒子系统Mesh优化配置
+        if (xn.SelectSingleNode("AutoSimplifyParticleMesh") != null)
+            AutoSimplifyParticleMesh = bool.Parse(xn.SelectSingleNode("AutoSimplifyParticleMesh").InnerText);
+
+        if (xn.SelectSingleNode("ParticleMeshMaxVertices") != null)
+            ParticleMeshMaxVertices = int.Parse(xn.SelectSingleNode("ParticleMeshMaxVertices").InnerText);
+
+        if (xn.SelectSingleNode("ParticleMeshSimplifyQuality") != null)
+            ParticleMeshSimplifyQuality = float.Parse(xn.SelectSingleNode("ParticleMeshSimplifyQuality").InnerText);
+
+        if (xn.SelectSingleNode("ShowParticleMeshWarning") != null)
+            ShowParticleMeshWarning = bool.Parse(xn.SelectSingleNode("ShowParticleMeshWarning").InnerText);
+
+        // 调试日志配置
+        if (xn.SelectSingleNode("EnableDebugLog") != null)
+            EnableDebugLog = bool.Parse(xn.SelectSingleNode("EnableDebugLog").InnerText);
+
         _updateConfig = false;
     }
     public static void saveConfiguration()
@@ -233,6 +350,28 @@ public class ExportConfig
         xn.SelectSingleNode("CustomizeDirectory").InnerText = CustomizeDirectory.ToString();
         xn.SelectSingleNode("CustomizeDirectoryName").InnerText = CustomizeDirectoryName;
         xn.SelectSingleNode("SavePath").InnerText = SAVEPATH;
+        
+        // 自定义Shader配置
+        if (xn.SelectSingleNode("EnableCustomShaderExport") != null)
+            xn.SelectSingleNode("EnableCustomShaderExport").InnerText = EnableCustomShaderExport.ToString();
+
+        // 粒子系统Mesh优化配置
+        if (xn.SelectSingleNode("AutoSimplifyParticleMesh") != null)
+            xn.SelectSingleNode("AutoSimplifyParticleMesh").InnerText = AutoSimplifyParticleMesh.ToString();
+
+        if (xn.SelectSingleNode("ParticleMeshMaxVertices") != null)
+            xn.SelectSingleNode("ParticleMeshMaxVertices").InnerText = ParticleMeshMaxVertices.ToString();
+
+        if (xn.SelectSingleNode("ParticleMeshSimplifyQuality") != null)
+            xn.SelectSingleNode("ParticleMeshSimplifyQuality").InnerText = ParticleMeshSimplifyQuality.ToString();
+
+        if (xn.SelectSingleNode("ShowParticleMeshWarning") != null)
+            xn.SelectSingleNode("ShowParticleMeshWarning").InnerText = ShowParticleMeshWarning.ToString();
+
+        // 调试日志配置
+        if (xn.SelectSingleNode("EnableDebugLog") != null)
+            xn.SelectSingleNode("EnableDebugLog").InnerText = EnableDebugLog.ToString();
+
         xmlDoc.Save(configUrl);
     }
 
@@ -254,5 +393,6 @@ public class ExportConfig
         CustomizeDirectory = false;
         CustomizeDirectoryName = "";
         _SAVEPATH = "Assets";
+        EnableCustomShaderExport = false;
     }
 }

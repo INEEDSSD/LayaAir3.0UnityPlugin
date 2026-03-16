@@ -39,7 +39,7 @@ public class ServeConfig
 
         if (request.error!=null)
         {
-            Debug.Log("Error: " + request.error);
+            ExportLogger.Error("Network request failed: " + request.error);
         }
         else
         {

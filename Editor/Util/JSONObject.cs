@@ -33,7 +33,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-internal class JSONObject {
+public class JSONObject {
 #if POOLING
 	const int MAX_POOL_SIZE = 10000;
 	public static Queue<JSONObject> releaseQueue = new Queue<JSONObject>();
@@ -430,12 +430,12 @@ internal class JSONObject {
 		//Profiler.EndSample();
 	}
     #endregion
-    private bool IsNumber { get { return type == Type.NUMBER; } }
-    private bool IsNull { get { return type == Type.NULL; } }
-    private bool IsString { get { return type == Type.STRING; } }
-    private bool IsBool { get { return type == Type.BOOL; } }
-    private bool IsArray { get { return type == Type.ARRAY; } }
-    private bool IsObject { get { return type == Type.OBJECT || type == Type.BAKED; } }
+    public bool IsNumber { get { return type == Type.NUMBER; } }
+    public bool IsNull { get { return type == Type.NULL; } }
+    public bool IsString { get { return type == Type.STRING; } }
+    public bool IsBool { get { return type == Type.BOOL; } }
+    public bool IsArray { get { return type == Type.ARRAY; } }
+    public bool IsObject { get { return type == Type.OBJECT || type == Type.BAKED; } }
 	public void Add(bool val) {
 		Add(Create(val));
 	}

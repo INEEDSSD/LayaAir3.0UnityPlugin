@@ -54,10 +54,12 @@ internal class NodeMap
     private ResoureMap _resoureMap;
     private List<GameObject> _roots;
     private int idOff;
-    public NodeMap(ResoureMap map,int idOff = 0)
+    private bool _sceneMode;
+    public NodeMap(ResoureMap map, int idOff = 0, bool sceneMode = false)
     {
         this._resoureMap = map;
         this.idOff = idOff;
+        this._sceneMode = sceneMode;
         this.refMap = new Dictionary<GameObject, RefObject>();
         this.nodeIdMaps = new Dictionary<GameObject, string>();
         this.overrideMaps = new Dictionary<GameObject, JSONObject>();
@@ -86,21 +88,25 @@ internal class NodeMap
 
         RefObject refObject = new RefObject();
         refObject.gameObject = gameObject;
-        GameObject baseRefRoot = PerfabFile.getPrefabInstanceRoot(gameObject);
-        if (baseRefRoot != null)
+        // 场景模式下跳过预制体检测，直接导出场景实例内容
+        if (!this._sceneMode)
         {
-            GameObject nearRoot = PerfabFile.GetNearestPrefabInstanceRoot(gameObject);
-            string rt;
-            while (nearRoot != baseRefRoot)
+            GameObject baseRefRoot = PerfabFile.getPrefabInstanceRoot(gameObject);
+            if (baseRefRoot != null)
             {
-                rt = PerfabFile.getPerfabFilePath(nearRoot);
-                refObject.addRefData(nearRoot, this._resoureMap.getPerfabFile(rt));
-                nearRoot = nearRoot.transform.parent.gameObject;
+                GameObject nearRoot = PerfabFile.GetNearestPrefabInstanceRoot(gameObject);
+                string rt;
+                while (nearRoot != baseRefRoot)
+                {
+                    rt = PerfabFile.getPerfabFilePath(nearRoot);
+                    refObject.addRefData(nearRoot, this._resoureMap.getPerfabFile(rt));
+                    nearRoot = nearRoot.transform.parent.gameObject;
+                }
+                rt = PerfabFile.getPerfabFilePath(baseRefRoot);
+                refObject.addRefData(baseRefRoot, this._resoureMap.getPerfabFile(rt));
             }
-            rt = PerfabFile.getPerfabFilePath(baseRefRoot);
-            refObject.addRefData(baseRefRoot, this._resoureMap.getPerfabFile(rt));
         }
-        
+
 
         refObject.jsonDatas = nodeData;
         refObject.nodeId = nodeId;
@@ -152,9 +158,8 @@ internal class NodeMap
         oriderIndex.childIndex = childIndex;
         oriderIndex.perfabIndex = perfabIndex;
         this.oriderIndexMap.Add(gameObject, oriderIndex);
-        int childCount = gameObject.transform.childCount;
         int foundIndex = -1;
-        for (int j = 0; j < childCount; j++)
+        for (int j = 0; j < gameObject.transform.childCount; j++)
         {
             GameObject child = gameObject.transform.GetChild(j).gameObject;
             if (!this.nodeIdMaps.ContainsKey(child))
@@ -213,9 +218,18 @@ internal class NodeMap
     }
     public int getGameNode(List<int> paths)
     {
+        if (paths.Count == 0 || paths[0] < 0 || paths[0] >= this._roots.Count)
+        {
+            return -1;
+        }
         Transform root = this._roots[paths[0]].transform;
         for(var i = 1; i < paths.Count; i++)
         {
+            if (paths[i] < 0 || paths[i] >= root.childCount)
+            {
+                Debug.LogWarning($"[LayaExport] getGameNode: child index {paths[i]} out of bounds (childCount={root.childCount}) at '{root.name}', path=[{string.Join(",", paths)}]");
+                return -1;
+            }
             root = root.GetChild(paths[i]);
         }
         RefObject refObject;

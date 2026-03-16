@@ -212,94 +212,137 @@ public class PropDatasConfig
         }
         else
         {
+            // Effect/particle shaders without explicit _Cull are typically double-sided (Cull Off)
+            string shaderName = material.shader?.name?.ToLower() ?? "";
+            if (shaderName.Contains("additive") || shaderName.Contains("particle") || shaderName.Contains("alphablend"))
+                return 0; // Off
+            // Transparent-queue shaders also default to Cull Off (matches Unity effect shader convention)
+            if (material.renderQueue >= 3000)
+                return 0; // Off
             return 2;
         }
     }
 
     public static int GetBlend(Material material)
     {
+        // Standard Shader方式：关键字 _ALPHABLEND_ON
         if (material.IsKeywordEnabled("_ALPHABLEND_ON"))
+            return 1;
+
+        // 渲染队列优先：透明队列(>=3000)视为开启混合（即使_SrcBlend/_DstBlend=One/Zero）
+        // 理由：自定义特效shader可能未正确设置_SrcBlend/_DstBlend，以renderQueue作为可靠指示
+        if (material.renderQueue >= 3000)
+            return 1;
+
+        // 不透明队列：通过_SrcBlend/_DstBlend精确判断
+        if (material.HasProperty("_SrcBlend") && material.HasProperty("_DstBlend"))
         {
+            int src = material.GetInt("_SrcBlend");
+            int dst = material.GetInt("_DstBlend");
+            if (src == 1 && dst == 0)   // One, Zero = 完全不透明
+                return 0;
             return 1;
         }
-        else
-        {
-            return 0;
-        }
+
+        return 0;
     }
 
     public static int GetSrcBlend(Material material)
     {
         if (material.HasProperty("_SrcBlend"))
         {
-            switch (material.GetInt("_SrcBlend"))
+            int unitySrc = material.GetInt("_SrcBlend");
+            // 特效shader修正：透明队列(>=3000)但_SrcBlend=One/_DstBlend=Zero时，强制使用SrcAlpha
+            // 这种情况通常是Unity材质未正确配置混合因子，以AlphaBlend为默认
+            if (unitySrc == 1 && material.renderQueue >= 3000)
+            {
+                int unitydst = material.HasProperty("_DstBlend") ? material.GetInt("_DstBlend") : -1;
+                if (unitydst == 0)
+                    return 6; // SrcAlpha（透明材质的正确默认值）
+            }
+            switch (unitySrc)
             {
                 case 0:
-                    return 0;
+                    return 0;  // Zero -> Zero
                 case 1:
-                    return 1;
+                    return 1;  // One -> One
                 case 2:
-                    return 4;
+                    return 4;  // DstColor -> DstColor
                 case 3:
-                    return 2;
+                    return 2;  // SrcColor -> SrcColor
                 case 4:
-                    return 5;
+                    return 5;  // OneMinusDstColor -> OneMinusDstColor
                 case 5:
-                    return 6;
+                    return 6;  // SrcAlpha -> SrcAlpha
                 case 6:
-                    return 3;
+                    return 7;  // OneMinusSrcAlpha -> OneMinusSrcAlpha [FIXED: was 3]
                 case 7:
-                    return 8;
+                    return 8;  // DstAlpha -> DstAlpha
                 case 8:
-                    return 9;
+                    return 9;  // OneMinusDstAlpha -> OneMinusDstAlpha
                 case 9:
-                    return 4;
+                    return 4;  // SrcAlphaSaturate -> DstColor (近似)
                 case 10:
-                    return 7;
+                    return 3;  // OneMinusSrcColor -> OneMinusSrcColor [FIXED: was 7]
                 default:
-                    return 1;
+                    return 6; // 默认SrcAlpha
             }
         }
         else
         {
-            return 1;
+            Debug.LogWarning($"LayaAir3D: Material '{material.name}' shader has no _SrcBlend property, using default SrcAlpha");
+            return 6; // 无属性时默认SrcAlpha（透明材质）
         }
     }
     public static int GetDstBlend(Material material)
     {
         if (material.HasProperty("_DstBlend"))
         {
-            switch (material.GetInt("_DstBlend"))
+            int unityDst = material.GetInt("_DstBlend");
+            // 特效shader修正：透明队列(>=3000)但_SrcBlend=One/_DstBlend=Zero时，强制使用OneMinusSrcAlpha
+            // 这种情况通常是Unity材质未正确配置混合因子，以AlphaBlend为默认
+            if (unityDst == 0 && material.renderQueue >= 3000)
+            {
+                int unitySrc = material.HasProperty("_SrcBlend") ? material.GetInt("_SrcBlend") : -1;
+                if (unitySrc == 1)
+                    return 7; // OneMinusSrcAlpha（透明材质的正确默认值）
+            }
+            switch (unityDst)
             {
                 case 0:
-                    return 0;
+                    return 0;  // Zero -> Zero
                 case 1:
-                    return 1;
+                    return 1;  // One -> One
                 case 2:
-                    return 4;
+                    return 4;  // DstColor -> DstColor
                 case 3:
-                    return 2;
+                    return 2;  // SrcColor -> SrcColor
                 case 4:
-                    return 5;
+                    return 5;  // OneMinusDstColor -> OneMinusDstColor
                 case 5:
-                    return 6;
+                    return 6;  // SrcAlpha -> SrcAlpha
                 case 6:
-                    return 3;
+                    return 7;  // OneMinusSrcAlpha -> OneMinusSrcAlpha [FIXED: was 3]
                 case 7:
-                    return 8;
+                    return 8;  // DstAlpha -> DstAlpha
                 case 8:
-                    return 9;
+                    return 9;  // OneMinusDstAlpha -> OneMinusDstAlpha
                 case 9:
-                    return 4;
+                    return 4;  // SrcAlphaSaturate -> DstColor (近似)
                 case 10:
-                    return 7;
+                    return 3;  // OneMinusSrcColor -> OneMinusSrcColor [FIXED: was 7]
                 default:
-                    return 0;
+                    return 7; // 默认OneMinusSrcAlpha（透明材质）
             }
         }
         else
         {
-            return 0;
+            // Fallback based on shader name
+            Debug.LogWarning($"LayaAir3D: Material '{material.name}' shader has no _DstBlend property, using fallback");
+            string shaderName = material.shader?.name?.ToLower() ?? "";
+            if (shaderName.Contains("additive"))
+                return 1; // One (additive blending: Src One Dst One)
+            return 7; // 无属性时默认OneMinusSrcAlpha（透明材质）
         }
     }
 
@@ -390,7 +433,7 @@ public class PropDatasConfig
         if (material.shader.name.StartsWith("Laya/") && material.HasProperty("_Mode")) {
             return material.GetInt("_Mode");
         }
-        
+
         string result = material.GetTag("RenderType", true);
         if (result == "Opaque")
         {
@@ -400,18 +443,75 @@ public class PropDatasConfig
         {
             return 1;
         }
-        else if (result == "Transparent")
+        else if (result == "Transparent" || result == "Fade")
         {
-            return 2;
-        }
-        else if (result == "Fade")
-        {
-            return 5;
+            // 区分 Additive 和 AlphaBlend：通过混合因子或 shader 名称判断
+            return DetectTransparentRenderMode(material);
         }
         else
         {
-            return 0;
+            // 无 RenderType tag 时，尝试从 shader 名称和混合因子推断
+            return DetectRenderModeFromShader(material);
         }
+    }
+
+    /// <summary>
+    /// 检测透明材质的具体渲染模式：Additive(3) / AlphaBlend(2)
+    /// 通过混合因子和 shader 名称综合判断
+    /// </summary>
+    public static int DetectTransparentRenderMode(Material material)
+    {
+        // 优先通过 shader 名称判断
+        string shaderName = material.shader.name.ToLower();
+        if (shaderName.Contains("additive"))
+        {
+            return 3; // Additive
+        }
+
+        // 通过混合因子判断：DstBlend=One 为 Additive，DstBlend=OneMinusSrcAlpha 为 AlphaBlend
+        if (material.HasProperty("_DstBlend"))
+        {
+            int dstBlend = material.GetInt("_DstBlend");
+            // Unity BlendMode: 1=One (Additive), 6=OneMinusSrcAlpha (AlphaBlend)
+            if (dstBlend == 1)
+            {
+                return 3; // Additive
+            }
+        }
+
+        return 2; // 默认 AlphaBlend
+    }
+
+    /// <summary>
+    /// 无 RenderType tag 时，从 shader 名称和混合因子推断渲染模式
+    /// </summary>
+    private static int DetectRenderModeFromShader(Material material)
+    {
+        string shaderName = material.shader.name.ToLower();
+
+        // shader 名称包含 additive
+        if (shaderName.Contains("additive"))
+        {
+            return 3; // Additive
+        }
+
+        // shader 名称包含粒子/特效相关关键字，进一步用混合因子判断
+        if (shaderName.Contains("particle") || shaderName.Contains("effect") ||
+            shaderName.Contains("transparent") || shaderName.Contains("alpha"))
+        {
+            if (material.HasProperty("_DstBlend"))
+            {
+                int dstBlend = material.GetInt("_DstBlend");
+                if (dstBlend == 1)
+                {
+                    return 3; // Additive
+                }
+                return 2; // AlphaBlend
+            }
+            return 2; // 默认 AlphaBlend
+        }
+
+        return 0; // 默认 Opaque
     }
 }
 internal class MetarialUitls 
@@ -559,8 +659,12 @@ internal class MetarialUitls
     {
         if (!MaterialPropsConfigs.ContainsKey(shaderName))
         {
-            FileUtil.setStatuse(false);
-            Debug.LogError("LayaAir3D Warning : not get the shader config " + shaderName);
+            // 启用了自定义Shader导出时，未注册的shader是预期情况（走CustomShaderExporter），静默跳过
+            if (!ExportConfig.EnableCustomShaderExport)
+            {
+                FileUtil.setStatuse(false);
+                Debug.LogWarning("LayaAir3D: Shader config not found: " + shaderName);
+            }
             return null;
         }
         return MaterialPropsConfigs[shaderName];
@@ -580,12 +684,30 @@ internal class MetarialUitls
             return false;
         }
     }
-    public static void WriteMetarial(Material material, JSONObject jsonData, ResoureMap resoureMap)
+    public static void WriteMetarial(Material material, JSONObject jsonData, ResoureMap resoureMap, MaterialFile materialFile = null)
     {
         string shaderName = material.shader.name;
-        if (!MaterialPropsConfigs.ContainsKey(shaderName)) {
+
+        // 检查是否有内置配置
+        if (!MaterialPropsConfigs.ContainsKey(shaderName))
+        {
+            // 优先走自定义Shader导出（包括粒子渲染器使用的自定义shader）
+            if (ExportConfig.EnableCustomShaderExport)
+            {
+                CustomShaderExporter.WriteAutoCustomShaderMaterial(material, jsonData, resoureMap, materialFile);
+                return;
+            }
+
+            // 未启用自定义Shader导出时，粒子渲染器材质回退到Laya内置粒子shader
+            if (materialFile != null && materialFile.IsUsedByParticleSystem())
+            {
+                ExportLogger.Warning($"Particle material '{material.name}' uses unregistered shader '{shaderName}', fallback to Laya particle shader. Enable 'Custom Shader Export' for better results.");
+                WriteParticleMaterialGeneric(material, jsonData, resoureMap);
+                return;
+            }
+
             FileUtil.setStatuse(false);
-            Debug.LogErrorFormat(material, "LayaAir3D Warning : not get the shader config " + shaderName);
+            Debug.LogErrorFormat(material, "LayaAir3D Warning : not get the shader config " + shaderName + ". Enable 'Custom Shader Export' to auto-export custom shaders.");
             return;
         }
         
@@ -758,7 +880,7 @@ internal class MetarialUitls
         string materialPath = AssetsUtil.GetMaterialPath(material);
         if (string.IsNullOrEmpty(materialPath))
         {
-            Debug.LogError("LayaAir3D Warning : material path is null or empty");
+            Debug.LogWarning("LayaAir3D: Material path is null or empty");
             return;
         }
         // 修复：安全地获取不带扩展名的路径
@@ -770,7 +892,7 @@ internal class MetarialUitls
         if (!MaterialPropsConfigs.ContainsKey(shaderName))
         {
             FileUtil.setStatuse(false);
-            Debug.LogError("LayaAir3D Warning : not get the shader config " + shaderName);
+            Debug.LogWarning("LayaAir3D: Shader config not found: " + shaderName);
             return;
         }
         PropDatasConfig propsData = MaterialPropsConfigs[shaderName];
@@ -825,7 +947,7 @@ internal class MetarialUitls
         props.AddField("alphaTest", PropDatasConfig.GetAlphaTest(material));
         props.AddField("alphaTestValue", PropDatasConfig.GetAlphaTestValue(material));
         props.AddField("renderQueue", material.renderQueue);
-        props.AddField("materialRenderMode", 0);
+        props.AddField("materialRenderMode", PropDatasConfig.GetRenderModule(material));
         foreach (var cList in propsData.colorLists)
         {
             if (!material.HasProperty(cList.Key))
@@ -892,13 +1014,13 @@ internal class MetarialUitls
                     TextureFile textureFile = resoureMap.GetTextureFile(tex, tConfig.isNormal);
                     if (textureFile != null)
                     {
-                        textures.Add(textureFile.jsonObject(tConfig.keyName));
+                                        textures.Add(textureFile.jsonObject("u_texture"));
                         hasValidTexture = true;
                     }
                 }
             }
         }
-        
+
         // 如果配置列表没有找到纹理，尝试直接从 _MainTex 获取
         if (!hasValidTexture && material.HasProperty("_MainTex"))
         {
@@ -917,27 +1039,20 @@ internal class MetarialUitls
                 }
             }
         }
-        
-        // 如果没有有效纹理，添加一个空的纹理占位符
-        if (!hasValidTexture)
-        {
-            JSONObject emptyTexture = new JSONObject(JSONObject.Type.OBJECT);
-            emptyTexture.AddField("name", "u_texture");
-            textures.Add(emptyTexture);
-        }
+
         props.AddField("textures", textures);
-        
-        // 材质类型
+
+        // 使用 Laya 内置粒子材质类型
         props.AddField("type", "PARTICLESHURIKEN");
         
         // 渲染队列 - 粒子通常使用透明队列
         props.AddField("renderQueue", material.renderQueue > 0 ? material.renderQueue : 3000);
         
-        // 材质渲染模式 - 2=透明/Additive
-        props.AddField("materialRenderMode", 2);
+        // 材质渲染模式 - 通过混合因子自动区分 Additive(3) / AlphaBlend(2)
+        props.AddField("materialRenderMode", PropDatasConfig.DetectTransparentRenderMode(material));
         
         // 剔除模式 - 粒子默认双面 (0=Off, 1=Front, 2=Back)
-        int cullMode = 2; // 默认 Back
+        int cullMode = 0; // 默认 Off (粒子通常双面渲染)
         if (material.HasProperty("_Cull"))
         {
             cullMode = material.GetInt("_Cull");
@@ -1012,7 +1127,7 @@ internal class MetarialUitls
         colorValue.Add(tintColor.b);
         colorValue.Add(tintColor.a);
         props.AddField("u_Tintcolor", colorValue);
-        
+
         // TilingOffset - 如果有的话
         if (material.HasProperty("_MainTex_ST"))
         {
@@ -1045,7 +1160,6 @@ internal class MetarialUitls
             defines.Add("TINTCOLOR");
         }
         
-        // 如果有纹理，添加 DIFFUSEMAP define
         if (hasValidTexture)
         {
             defines.Add("DIFFUSEMAP");
@@ -1059,10 +1173,108 @@ internal class MetarialUitls
         
         props.AddField("defines", defines);
     }
-    
+
+    /// <summary>
+    /// 将 Unity 内置粒子 Shader 名称映射到 LayaAir 3.0 shader 名称
+    /// Particles/Additive系列 → Effect_Basic_Additive
+    /// 其他（AlphaBlended / Standard / default）→ Effect_Basic_AlphaBlend
+    /// </summary>
+    public static string GetLayaShaderNameForParticle(Material material)
+    {
+        string shaderName = material.shader.name.ToLower();
+        if (shaderName.Contains("additive"))
+            return "Effect_Basic_Additive";
+        return "Effect_Basic_AlphaBlend";
+    }
+
+    /// <summary>
+    /// 通用粒子材质导出：当粒子渲染器使用的材质无法通过注册配置或内置检测导出时，
+    /// 回退到 Laya 内置粒子 shader（根据混合模式选择 AlphaBlend 或 Additive）
+    /// </summary>
+    public static void WriteParticleMaterialGeneric(Material material, JSONObject jsonData, ResoureMap resoureMap)
+    {
+        jsonData.AddField("version", "LAYAMATERIAL:04");
+        JSONObject props = new JSONObject(JSONObject.Type.OBJECT);
+        jsonData.AddField("props", props);
+
+        // 纹理 - 尝试从常见的贴图属性获取
+        JSONObject textures = new JSONObject(JSONObject.Type.ARRAY);
+        bool hasValidTexture = false;
+        string[] texPropNames = { "_MainTex", "_BaseMap", "_AlbedoTexture" };
+        foreach (string propName in texPropNames)
+        {
+            if (!material.HasProperty(propName)) continue;
+            Texture tex = material.GetTexture(propName);
+            if (tex == null) continue;
+            string texPath = UnityEditor.AssetDatabase.GetAssetPath(tex.GetInstanceID());
+            if (ResoureMap.IsBuiltinResource(texPath)) continue;
+            TextureFile textureFile = resoureMap.GetTextureFile(tex, false);
+            if (textureFile != null)
+            {
+                textures.Add(textureFile.jsonObject("u_texture"));
+                hasValidTexture = true;
+                break;
+            }
+        }
+        props.AddField("textures", textures);
+
+        // 使用 Laya 内置粒子材质类型
+        props.AddField("type", "PARTICLESHURIKEN");
+
+        // 渲染队列
+        props.AddField("renderQueue", material.renderQueue > 0 ? material.renderQueue : 3000);
+
+        // 材质渲染模式
+        props.AddField("materialRenderMode", PropDatasConfig.DetectTransparentRenderMode(material));
+
+        // 剔除模式 - 粒子默认双面
+        int cullMode = 0;
+        if (material.HasProperty("_Cull"))
+            cullMode = material.GetInt("_Cull");
+        props.AddField("s_Cull", cullMode);
+
+        // 混合设置
+        props.AddField("s_Blend", 1);
+        props.AddField("s_BlendSrc", GetParticleSrcBlend(material));
+        props.AddField("s_BlendDst", GetParticleDstBlend(material));
+
+        // 深度
+        props.AddField("s_DepthTest", 1);
+        bool depthWrite = false;
+        if (material.HasProperty("_ZWrite"))
+            depthWrite = material.GetInt("_ZWrite") == 1;
+        props.AddField("s_DepthWrite", depthWrite);
+
+        // 颜色
+        Color tintColor = new Color(0.5f, 0.5f, 0.5f, 1.0f);
+        bool hasColor = false;
+        string[] colorPropNames = { "_TintColor", "_Color", "_BaseColor" };
+        foreach (string propName in colorPropNames)
+        {
+            if (material.HasProperty(propName))
+            {
+                tintColor = material.GetColor(propName);
+                hasColor = true;
+                break;
+            }
+        }
+        JSONObject colorValue = new JSONObject(JSONObject.Type.ARRAY);
+        colorValue.Add(tintColor.r);
+        colorValue.Add(tintColor.g);
+        colorValue.Add(tintColor.b);
+        colorValue.Add(tintColor.a);
+        props.AddField("u_Tintcolor", colorValue);
+
+        // Defines
+        JSONObject defines = new JSONObject(JSONObject.Type.ARRAY);
+        if (hasColor) defines.Add("TINTCOLOR");
+        if (hasValidTexture) defines.Add("DIFFUSEMAP");
+        props.AddField("defines", defines);
+    }
+
     /// <summary>
     /// 获取粒子材质的源混合因子 (LayaAir 格式)
-    /// LayaAir BlendFactor: 0=Zero, 1=One, 2=SrcColor, 3=OneMinusSrcColor, 4=DstColor, 
+    /// LayaAir BlendFactor: 0=Zero, 1=One, 2=SrcColor, 3=OneMinusSrcColor, 4=DstColor,
     /// 5=OneMinusDstColor, 6=SrcAlpha, 7=OneMinusSrcAlpha, 8=DstAlpha, 9=OneMinusDstAlpha
     /// </summary>
     private static int GetParticleSrcBlend(Material material)
@@ -1118,9 +1330,9 @@ internal class MetarialUitls
     
     /// <summary>
     /// Unity BlendMode 转换为 LayaAir BlendFactor
-    /// Unity: 0=Zero, 1=One, 2=DstColor, 3=SrcColor, 4=OneMinusDstColor, 5=SrcAlpha, 
-    /// 6=OneMinusSrcColor, 7=DstAlpha, 8=OneMinusDstAlpha, 9=SrcAlphaSaturate, 10=OneMinusSrcAlpha
-    /// LayaAir: 0=Zero, 1=One, 2=SrcColor, 3=OneMinusSrcColor, 4=DstColor, 
+    /// Unity: 0=Zero, 1=One, 2=DstColor, 3=SrcColor, 4=OneMinusDstColor, 5=SrcAlpha,
+    /// 6=OneMinusSrcAlpha, 7=DstAlpha, 8=OneMinusDstAlpha, 9=SrcAlphaSaturate, 10=OneMinusSrcColor
+    /// LayaAir: 0=Zero, 1=One, 2=SrcColor, 3=OneMinusSrcColor, 4=DstColor,
     /// 5=OneMinusDstColor, 6=SrcAlpha, 7=OneMinusSrcAlpha, 8=DstAlpha, 9=OneMinusDstAlpha
     /// </summary>
     private static int ConvertUnityBlendToLaya(int unityBlend)
@@ -1133,11 +1345,11 @@ internal class MetarialUitls
             case 3: return 2;  // SrcColor -> SrcColor
             case 4: return 5;  // OneMinusDstColor -> OneMinusDstColor
             case 5: return 6;  // SrcAlpha -> SrcAlpha
-            case 6: return 3;  // OneMinusSrcColor -> OneMinusSrcColor
+            case 6: return 7;  // OneMinusSrcAlpha -> OneMinusSrcAlpha [FIXED: was 3]
             case 7: return 8;  // DstAlpha -> DstAlpha
             case 8: return 9;  // OneMinusDstAlpha -> OneMinusDstAlpha
             case 9: return 6;  // SrcAlphaSaturate -> SrcAlpha (近似)
-            case 10: return 7; // OneMinusSrcAlpha -> OneMinusSrcAlpha
+            case 10: return 3; // OneMinusSrcColor -> OneMinusSrcColor [FIXED: was 7]
             default: return 1; // 默认 One
         }
     }

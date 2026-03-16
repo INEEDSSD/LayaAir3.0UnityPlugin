@@ -216,6 +216,74 @@
             }
         ]
     },
+    "Universal Render Pipeline/Simple Lit": {
+        "targeName": "BLINNPHONG",
+        "textures": [
+            {
+                "uName": "_BaseMap",
+                "layaName": "u_DiffuseTexture",
+                "defind": "DIFFUSEMAP"
+            },
+            {
+                "uName": "_BumpMap",
+                "layaName": "u_NormalTexture",
+                "defind": "NORMALTEXTURE",
+                "isNormal": true
+            },
+            {
+                "uName": "_SpecGlossMap",
+                "layaName": "u_SpecularTexture",
+                "defind": "SPECULARMAP"
+            },
+            {
+                "uName": "_EmissionMap",
+                "layaName": "u_EmissionTexture",
+                "defind": "EMISSIONTEXTURE"
+            }
+        ],
+        "colors": [
+            {
+                "uName": "_BaseColor",
+                "layaName": "u_DiffuseColor"
+            },
+            {
+                "uName": "_SpecColor",
+                "layaName": "u_MaterialSpecular"
+            },
+            {
+                "uName": "_EmissionColor",
+                "layaName": "u_EmissionColor",
+                "hdrName": "u_EmissionIntensity"
+            }
+        ],
+        "tillOffset": [
+            {
+                "uName": "_BaseMap_ST",
+                "layaName": "u_TilingOffset"
+            }
+        ],
+        "floats": [
+            {
+                "uName": "_Smoothness",
+                "layaName": "u_Smoothness"
+            },
+            {
+                "uName": "_BumpScale",
+                "layaName": "u_NormalScale"
+            },
+            {
+                "uName": "_Cutoff",
+                "layaName": "u_AlphaTestValue"
+            }
+        ],
+        "defineds": [
+            {
+                "uName": "_EMISSION",
+                "layaName": "EMISSION",
+                "from": 1
+            }
+        ]
+    },
     "Universal Render Pipeline/Unlit": {
         "targeName": "Unlit",
         "textures": [
@@ -251,6 +319,16 @@
                 "layaName": "u_NormalTexture",
                 "defind": "NORMALTEXTURE",
                 "isNormal": true
+            },
+            {
+                "uName": "_MaskMap",
+                "layaName": "u_MetallicGlossTexture",
+                "defind": "METALLICGLOSSTEXTURE"
+            },
+            {
+                "uName": "_EmissiveColorMap",
+                "layaName": "u_EmissionTexture",
+                "defind": "EMISSIONTEXTURE"
             }
         ],
         "colors": [
@@ -259,9 +337,29 @@
                 "layaName": "u_AlbedoColor"
             },
             {
-                "uName": "_EmissionColor",
+                "uName": "_EmissiveColor",
                 "layaName": "u_EmissionColor",
                 "hdrName": "u_EmissionIntensity"
+            }
+        ],
+        "tillOffset": [
+            {
+                "uName": "_BaseColorMap_ST",
+                "layaName": "u_TilingOffset"
+            }
+        ],
+        "floats": [
+            {
+                "uName": "_Metallic",
+                "layaName": "u_Metallic"
+            },
+            {
+                "uName": "_Smoothness",
+                "layaName": "u_Smoothness"
+            },
+            {
+                "uName": "_NormalScale",
+                "layaName": "u_NormalScale"
             }
         ],
         "defineds": [

@@ -26,6 +26,14 @@ namespace LayaExport
         }
 
         /// <summary>
+        /// LayaAir粒子系统顶点数量限制
+        /// 在LayaAir中: totalVertexCount = maxParticles * meshVertexCount
+        /// 如果 totalVertexCount > 65535，会抛出异常
+        /// 此限制仅适用于Mesh渲染模式
+        /// </summary>
+        private const int MAX_PARTICLE_VERTEX_COUNT = 65535;
+
+        /// <summary>
         /// 导出粒子系统组件数据到新版格式
         /// </summary>
         /// <param name="gameObject">要导出的GameObject</param>
@@ -40,6 +48,9 @@ namespace LayaExport
                 Debug.LogWarning("LayaAir3D: GameObject does not have ParticleSystem or ParticleSystemRenderer component.");
                 return null;
             }
+            
+            // ⭐ 检查粒子系统mesh顶点数量限制
+            CheckParticleVertexLimit(ps, psr, gameObject.name, resoureMap);
 
             JSONObject comp = new JSONObject(JSONObject.Type.OBJECT);
             comp.AddField("_$type", "ShurikenParticleRenderer");
@@ -62,7 +73,7 @@ namespace LayaExport
                         // 使用ResoureMap的材质导出逻辑（如果可用）
                         if (resoureMap != null)
                         {
-                            sharedMaterials.Add(resoureMap.GetMaterialData(mat));
+                            sharedMaterials.Add(resoureMap.GetMaterialData(mat, psr));
                         }
                         else
                         {
@@ -144,6 +155,30 @@ namespace LayaExport
                     comp.AddField("stretchedBillboardLengthScale", psr.lengthScale);
             }
 
+            // Mesh模式下的 RenderAlignment 检查
+            // Unity 中 Mesh + View alignment 相当于 billboard 效果，
+            // 但 LayaAir 中 Mesh 就是 Mesh，没有 RenderAlignment 属性，无法实现此效果
+            if (renderMode == 4 && psr.alignment == ParticleSystemRenderSpace.View)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleRenderer Mesh+View Alignment（粒子Mesh模式+朝向摄像机）",
+                    psr.gameObject,
+                    "LayaAir 中 Mesh 模式不支持 RenderAlignment=View，粒子不会朝向摄像机，如需此效果请改用 Billboard 模式"
+                );
+            }
+
+            // Billboard模式下的 RenderAlignment=Local 检查
+            // Unity 中 Billboard + Local alignment 粒子会跟随发射器的局部坐标轴旋转，表现类似 Mesh 模式
+            // LayaAir 中 Billboard 始终朝向摄像机，无法还原 Local alignment 的效果
+            if (renderMode == 0 && psr.alignment == ParticleSystemRenderSpace.Local)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleRenderer Billboard+Local Alignment（粒子Billboard模式+局部对齐）",
+                    psr.gameObject,
+                    "Unity 中 Billboard+RenderAlignment=Local 粒子会跟随发射器局部坐标旋转（类似Mesh表现），LayaAir 中 Billboard 始终朝向摄像机，无法还原此效果。如需类似表现请改用 Mesh 模式"
+                );
+            }
+
             // Mesh模式
             if (renderMode == 4 && psr.mesh != null)
             {
@@ -170,6 +205,18 @@ namespace LayaExport
             // sortingFudge
             if (psr.sortingFudge != 0)
                 comp.AddField("sortingFudge", psr.sortingFudge);
+
+            // pivot - 粒子轴心点偏移（Billboard模式下的对齐偏移）
+            // Unity pivot范围: -1到1，(0,0,0)表示中心对齐
+            // (-1,-1,0)=左下角, (1,1,0)=右上角, (0,1,0)=顶部中心, 等等
+            // 原样导出Unity的值到LayaAir
+            Vector3 pivot = psr.pivot;
+            JSONObject pivotObj = new JSONObject(JSONObject.Type.OBJECT);
+            pivotObj.AddField("_$type", "Vector3");
+            pivotObj.AddField("x", pivot.x);
+            pivotObj.AddField("y", pivot.y);
+            pivotObj.AddField("z", pivot.z);
+            comp.AddField("pivot", pivotObj);
         }
 
         /// <summary>
@@ -185,13 +232,11 @@ namespace LayaExport
             if (main.duration != 5)
                 particleSystem.AddField("duration", main.duration);
 
-            // looping
-            if (!main.loop)
-                particleSystem.AddField("looping", main.loop);
+            // looping - 始终导出（Laya默认为false，不导出则粒子只播放一次不循环）
+            particleSystem.AddField("looping", main.loop);
 
-            // playOnAwake
-            if (!main.playOnAwake)
-                particleSystem.AddField("playOnAwake", main.playOnAwake);
+            // playOnAwake - 始终导出（Laya默认为false，不导出则粒子不自动播放）
+            particleSystem.AddField("playOnAwake", main.playOnAwake);
 
             // startDelayType & startDelay
             ExportStartDelay(main, particleSystem);
@@ -275,6 +320,267 @@ namespace LayaExport
             // textureSheetAnimation
             if (ps.textureSheetAnimation.enabled)
                 ExportTextureSheetAnimation(ps.textureSheetAnimation, particleSystem);
+
+            CheckUnsupportedParticleFeatures(ps, main);
+        }
+
+        /// <summary>
+        /// 检测并汇报粒子系统中 LayaAir 不支持的功能参数。
+        /// 路径信息由 UnsupportedFeatureCollector 自动从 GameObject 层级生成。
+        /// </summary>
+        private static void CheckUnsupportedParticleFeatures(ParticleSystem ps, ParticleSystem.MainModule main)
+        {
+            GameObject go = ps.gameObject;
+
+            // ── 1. GravityModifier 非 Constant 类型 ──────────────────────────────
+            if (main.gravityModifier.mode != ParticleSystemCurveMode.Constant)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem GravityModifier（重力修改器非常量类型）",
+                    go,
+                    $"当前模式: {main.gravityModifier.mode}，LayaAir 仅支持 Constant 类型，将以常量值 {main.gravityModifier.constant:F3} 导出"
+                );
+            }
+
+            // ── 2. StartColor Gradient / RandomColor 类型 ────────────────────────
+            var colorMode = main.startColor.mode;
+            if (colorMode == ParticleSystemGradientMode.Gradient ||
+                colorMode == ParticleSystemGradientMode.RandomColor)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem StartColor（初始颜色 Gradient/RandomColor 类型）",
+                    go,
+                    $"当前模式: {colorMode}，LayaAir 仅支持 Color 和 TwoColors 类型，Gradient 将降级为渐变起始帧颜色"
+                );
+            }
+
+            // ── 3. Emission：rateOverTime 非 Constant 模式 ──────────────────────
+            if (ps.emission.enabled &&
+                ps.emission.rateOverTime.mode != ParticleSystemCurveMode.Constant)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem Emission RateOverTime（发射率非常量类型）",
+                    go,
+                    $"当前模式: {ps.emission.rateOverTime.mode}，LayaAir 仅支持 Constant 模式，将以常量值 {ps.emission.rateOverTime.constant:F1} 导出（曲线数据丢失）"
+                );
+            }
+
+            // ── 4. Emission Burst：Cycles 有限次数 + Probability 概率 ────────────
+            if (ps.emission.enabled && ps.emission.burstCount > 0)
+            {
+                var burstArray = new ParticleSystem.Burst[ps.emission.burstCount];
+                ps.emission.GetBursts(burstArray);
+                foreach (var burst in burstArray)
+                {
+                    // cycleCount > 0 表示有限循环次数（0 = 无限，LayaAir 支持）
+                    if (burst.cycleCount > 0)
+                    {
+                        UnsupportedFeatureCollector.AddWarning(
+                            "ParticleSystem Emission Burst Cycles（爆发有限循环次数）",
+                            go,
+                            $"Burst time={burst.time:F2}s, cycleCount={burst.cycleCount}，LayaAir 不支持有限循环次数，将按无限循环导出"
+                        );
+                    }
+                    // probability < 1 表示爆发不是每次都触发
+                    if (burst.probability < 1f)
+                    {
+                        UnsupportedFeatureCollector.AddWarning(
+                            "ParticleSystem Emission Burst Probability（爆发触发概率）",
+                            go,
+                            $"Burst time={burst.time:F2}s, probability={burst.probability:F2}，LayaAir 不支持 Burst 概率设置，将按 100% 概率导出"
+                        );
+                    }
+                }
+            }
+
+            // ── 5. Shape 不支持的形状类型 + Shape 变换偏移 ─────────────────────────
+            if (ps.shape.enabled)
+            {
+                // 5a. 不支持的形状类型
+                var st = ps.shape.shapeType;
+                bool isSupportedShape =
+                    st == ParticleSystemShapeType.Sphere          ||
+                    st == ParticleSystemShapeType.SphereShell     ||
+                    st == ParticleSystemShapeType.Hemisphere      ||
+                    st == ParticleSystemShapeType.HemisphereShell ||
+                    st == ParticleSystemShapeType.Cone            ||
+                    st == ParticleSystemShapeType.ConeVolume      ||
+                    st == ParticleSystemShapeType.ConeVolumeShell ||
+                    st == ParticleSystemShapeType.Box             ||
+                    st == ParticleSystemShapeType.BoxShell        ||
+                    st == ParticleSystemShapeType.BoxEdge         ||
+                    st == ParticleSystemShapeType.Circle          ||
+                    st == ParticleSystemShapeType.CircleEdge;
+                if (!isSupportedShape)
+                {
+                    UnsupportedFeatureCollector.AddWarning(
+                        "ParticleSystem Shape（不支持的形状类型）",
+                        go,
+                        $"当前形状: {st}，LayaAir 仅支持 Sphere/Hemisphere/Cone/Box/Circle，将降级为 SphereShape"
+                    );
+                }
+
+                // 5b. Shape Rotation 非默认值（LayaAir 所有形状均不支持 rotation 参数）
+                if (ps.shape.rotation != Vector3.zero)
+                {
+                    UnsupportedFeatureCollector.AddWarning(
+                        "ParticleSystem Shape Rotation（形状旋转偏移）",
+                        go,
+                        $"Shape rotation={ps.shape.rotation}，LayaAir 不支持 Shape 模块的旋转参数，发射朝向的旋转偏移将丢失。" +
+                        "建议将 Shape Rotation 的值合并到粒子系统 GameObject 的 Transform Rotation 中以保持视觉效果一致"
+                    );
+                }
+
+                // 5c. Shape Position 非默认值
+                if (ps.shape.position != Vector3.zero)
+                {
+                    UnsupportedFeatureCollector.AddWarning(
+                        "ParticleSystem Shape Position（形状位置偏移）",
+                        go,
+                        $"Shape position={ps.shape.position}，LayaAir 不支持 Shape 模块的 position 偏移参数，发射位置偏移将丢失"
+                    );
+                }
+            }
+
+            // ── 6. LimitVelocityOverLifetime ─────────────────────────────────────
+            if (ps.limitVelocityOverLifetime.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem LimitVelocityOverLifetime（生命周期速度限制）",
+                    go,
+                    "LayaAir 粒子系统不支持 Limit Velocity over Lifetime 模块，该模块不会被导出"
+                );
+            }
+
+            // ── 7. InheritVelocity（继承速度）────────────────────────────────────
+            if (ps.inheritVelocity.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem InheritVelocity（继承速度）",
+                    go,
+                    "LayaAir 粒子系统不支持 Inherit Velocity 模块，该模块不会被导出"
+                );
+            }
+
+            // ── 8. ForceOverLifetime（生命周期受力）──────────────────────────────
+            if (ps.forceOverLifetime.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem ForceOverLifetime（生命周期受力）",
+                    go,
+                    "LayaAir 粒子系统不支持 Force over Lifetime 模块，该模块不会被导出"
+                );
+            }
+
+            // ── 9. ColorBySpeed（按速度变色）────────────────────────────────────
+            if (ps.colorBySpeed.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem ColorBySpeed（按速度变色）",
+                    go,
+                    "LayaAir 粒子系统不支持 Color by Speed 模块，该模块不会被导出"
+                );
+            }
+
+            // ── 10. SizeBySpeed（按速度变尺寸）──────────────────────────────────
+            if (ps.sizeBySpeed.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem SizeBySpeed（按速度变尺寸）",
+                    go,
+                    "LayaAir 粒子系统不支持 Size by Speed 模块，该模块不会被导出"
+                );
+            }
+
+            // ── 11. RotationBySpeed（按速度旋转）────────────────────────────────
+            if (ps.rotationBySpeed.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem RotationBySpeed（按速度旋转）",
+                    go,
+                    "LayaAir 粒子系统不支持 Rotation by Speed 模块，该模块不会被导出"
+                );
+            }
+
+            // ── 12. ExternalForces（外部风力区域）───────────────────────────────
+            if (ps.externalForces.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem ExternalForces（外部风力区域）",
+                    go,
+                    "LayaAir 粒子系统不支持 External Forces 模块，WindZone 等外力不会被导出"
+                );
+            }
+
+            // ── 13. Collision（粒子碰撞）────────────────────────────────────────
+            if (ps.collision.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem Collision（粒子碰撞）",
+                    go,
+                    "LayaAir 粒子系统不支持 Collision 模块，该模块不会被导出"
+                );
+            }
+
+            // ── 14. Trigger（粒子触发器）────────────────────────────────────────
+            if (ps.trigger.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem Trigger（粒子触发器）",
+                    go,
+                    "LayaAir 粒子系统不支持 Trigger 模块，该模块不会被导出"
+                );
+            }
+
+            // ── 15. Trails（粒子拖尾）────────────────────────────────────────────
+            if (ps.trails.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem Trails（粒子拖尾）",
+                    go,
+                    "LayaAir 粒子系统不支持 Trails 模块，拖尾效果不会被导出"
+                );
+            }
+
+            // ── 16. Lights（粒子灯光）────────────────────────────────────────────
+            if (ps.lights.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem Lights（粒子灯光）",
+                    go,
+                    "LayaAir 粒子系统不支持 Lights 模块，粒子灯光效果不会被导出"
+                );
+            }
+
+            // ── 17. Noise（噪声扰动）─────────────────────────────────────────────
+            if (ps.noise.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem Noise（噪声扰动）",
+                    go,
+                    "LayaAir 粒子系统不支持 Noise 模块，该模块不会被导出"
+                );
+            }
+
+            // ── 18. SubEmitters（子发射器）───────────────────────────────────────
+            if (ps.subEmitters.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem SubEmitters（子发射器）",
+                    go,
+                    "LayaAir 粒子系统不支持 SubEmitters 模块，子发射器不会被导出"
+                );
+            }
+
+            // ── 19. CustomData（自定义数据）──────────────────────────────────────
+            if (ps.customData.enabled)
+            {
+                UnsupportedFeatureCollector.AddWarning(
+                    "ParticleSystem CustomData（粒子自定义数据）",
+                    go,
+                    "LayaAir 粒子系统不支持 CustomData 模块，该模块不会被导出。如果 Shader 依赖 CustomData，请改用 UV/颜色等已支持的通道传递数据"
+                );
+            }
         }
 
         #region Main Module Exports
@@ -306,8 +612,8 @@ namespace LayaExport
             if (lifetimeType != 0)
                 particleSystem.AddField("startLifetimeType", lifetimeType);
 
-            // 始终导出 startLifetimeConstant (使用 constantMax 作为默认值)
-            float lifetimeConstant = lifetimeType == 2 ? main.startLifetime.constantMax : main.startLifetime.constant;
+            // 始终导出 startLifetimeConstant (TwoConstants 取 constantMax，Curve 模式通过求值获取真实值)
+            float lifetimeConstant = lifetimeType == 2 ? main.startLifetime.constantMax : EvaluateMinMaxCurveConstant(main.startLifetime, 5f);
             if (lifetimeConstant != 5)
                 particleSystem.AddField("startLifetimeConstant", lifetimeConstant);
 
@@ -326,8 +632,8 @@ namespace LayaExport
             if (speedType != 0)
                 particleSystem.AddField("startSpeedType", speedType);
 
-            // 始终导出 startSpeedConstant (使用 constantMax 作为默认值)
-            float speedConstant = speedType == 2 ? main.startSpeed.constantMax : main.startSpeed.constant;
+            // 始终导出 startSpeedConstant (TwoConstants 取 constantMax，Curve 模式通过求值获取真实值)
+            float speedConstant = speedType == 2 ? main.startSpeed.constantMax : EvaluateMinMaxCurveConstant(main.startSpeed, 5f);
             if (speedConstant != 5)
                 particleSystem.AddField("startSpeedConstant", speedConstant);
 
@@ -355,8 +661,10 @@ namespace LayaExport
                 // 非3D模式
                 if (sizeType == 0)
                 {
-                    if (main.startSize.constant != 1)
-                        particleSystem.AddField("startSizeConstant", main.startSize.constant);
+                    // Curve 模式下 .constant 返回 0；使用 helper 正确求值
+                    float sizeConstant = EvaluateMinMaxCurveConstant(main.startSize, 1f);
+                    if (sizeConstant != 1)
+                        particleSystem.AddField("startSizeConstant", sizeConstant);
                 }
                 else
                 {
@@ -367,11 +675,11 @@ namespace LayaExport
                 }
             }
 
-            // startSizeConstantSeparate (始终导出)
+            // startSizeConstantSeparate (始终导出，Curve 模式用 helper 求值)
             JSONObject sizeSeparate = CreateVector3Object(
-                main.startSizeX.constant,
-                main.startSizeY.constant,
-                main.startSizeZ.constant
+                EvaluateMinMaxCurveConstant(main.startSizeX, 1f),
+                EvaluateMinMaxCurveConstant(main.startSizeY, 1f),
+                EvaluateMinMaxCurveConstant(main.startSizeZ, 1f)
             );
             particleSystem.AddField("startSizeConstantSeparate", sizeSeparate);
 
@@ -573,8 +881,8 @@ namespace LayaExport
 
             // 注意: 不导出 enable 字段，标准格式中没有这个字段
 
-            if (emission.rateOverTime.constant != 10)
-                emissionObj.AddField("emissionRate", emission.rateOverTime.constant);
+            // 始终导出emissionRate（Laya默认不一定是10，显式导出以确保正确）
+            emissionObj.AddField("emissionRate", emission.rateOverTime.constant);
 
             if (emission.rateOverDistance.constant != 0)
                 emissionObj.AddField("emissionRateOverDistance", emission.rateOverDistance.constant);
@@ -590,12 +898,33 @@ namespace LayaExport
                 {
                     JSONObject burstObj = new JSONObject(JSONObject.Type.OBJECT);
                     burstObj.AddField("_$type", "Burst");
-                    // 只导出非默认值: _time 默认0, _minCount 默认0, _maxCount 需要导出
+                    // 只导出非默认值: _time 默认0
                     if (burst.time != 0)
                         burstObj.AddField("_time", burst.time);
-                    if (burst.minCount != 0)
-                        burstObj.AddField("_minCount", burst.minCount);
-                    burstObj.AddField("_maxCount", burst.maxCount);
+
+                    // 使用 burst.count (MinMaxCurve) 而非已废弃的 minCount/maxCount
+                    var countCurve = burst.count;
+                    if (countCurve.mode == ParticleSystemCurveMode.Constant)
+                    {
+                        // 常量模式: min 和 max 都设为同一个值
+                        int count = (int)countCurve.constant;
+                        burstObj.AddField("_minCount", count);
+                        burstObj.AddField("_maxCount", count);
+                    }
+                    else if (countCurve.mode == ParticleSystemCurveMode.TwoConstants)
+                    {
+                        // 随机双常量模式: 分别设置 min 和 max
+                        burstObj.AddField("_minCount", (int)countCurve.constantMin);
+                        burstObj.AddField("_maxCount", (int)countCurve.constantMax);
+                    }
+                    else
+                    {
+                        // 曲线模式等其他情况: 回退到 evaluate 取当前值
+                        int count = (int)countCurve.Evaluate(0f);
+                        burstObj.AddField("_minCount", count);
+                        burstObj.AddField("_maxCount", count);
+                    }
+
                     bursts.Add(burstObj);
                 }
                 emissionObj.AddField("_bursts", bursts);
@@ -612,6 +941,9 @@ namespace LayaExport
         /// - ConeShape: angleDEG, radius, length, emitType, randomDirection
         /// - BoxShape: x, y, z, randomDirection
         /// - CircleShape: radius, emitFromEdge, arcDEG, randomDirection
+        ///
+        /// 注意：Unity ShapeModule 的 rotation/position 变换偏移不被 LayaAir 支持，
+        /// 这些参数会由 CheckUnsupportedParticleFeatures 在导出时产生警告。
         /// </summary>
         private static void ExportShape(ParticleSystem.ShapeModule shape, JSONObject particleSystem)
         {
@@ -1078,6 +1410,222 @@ namespace LayaExport
 
         #endregion
 
+        #region Validation Methods
+
+        /// <summary>
+        /// 检查并处理粒子系统顶点数量超限问题
+        /// 只检查Mesh渲染模式的粒子系统
+        /// LayaAir限制：粒子系统总顶点数 = maxParticles × meshVertexCount ≤ 65535
+        /// </summary>
+        private static void CheckParticleVertexLimit(ParticleSystem ps, ParticleSystemRenderer psr, string objectName, ResoureMap resoureMap = null)
+        {
+            // 只有Mesh渲染模式才需要检查顶点限制
+            if (psr.renderMode != ParticleSystemRenderMode.Mesh)
+            {
+                return;
+            }
+
+            // 没有Mesh则不需要检查
+            if (psr.mesh == null)
+            {
+                return;
+            }
+
+            int maxParticles = ps.main.maxParticles;
+            Mesh originalMesh = psr.mesh;
+            int meshVertexCount = originalMesh.vertexCount;
+            int totalVertexCount = maxParticles * meshVertexCount;
+            int vertexLimit = ExportConfig.ParticleMeshMaxVertices;
+
+#if ENABLE_PARTICLE_MESH_OPTIMIZATION
+            if (totalVertexCount > vertexLimit)
+            {
+                // ⚠️ 粒子Mesh优化功能已暂时禁用
+                // 如需启用，请在项目设置中添加 ENABLE_PARTICLE_MESH_OPTIMIZATION 脚本定义符号
+
+                // 计算建议的最大粒子数和目标顶点数
+                int suggestedMaxParticles = MeshSimplifier.CalculateSuggestedMaxParticles(meshVertexCount, vertexLimit);
+                int targetMeshVertexCount = MeshSimplifier.CalculateTargetVertexCount(maxParticles, vertexLimit);
+
+                string problemDescription = string.Format(
+                    "粒子系统 '{0}' (Mesh模式) 的顶点数量超过限制!\n" +
+                    "当前配置: maxParticles={1}, Mesh顶点数={2}, 总顶点数={3}\n" +
+                    "限制: 总顶点数 ≤ {4}",
+                    objectName, maxParticles, meshVertexCount, totalVertexCount, vertexLimit);
+
+                // 尝试自动简化mesh
+                if (ExportConfig.AutoSimplifyParticleMesh)
+                {
+                    ExportLogger.Log($"LayaAir3D: {problemDescription}");
+
+                    // ⭐ 优先检查ParticleSystemRenderer是否有meshes数组（支持多个mesh）
+                    // 如果meshes[1]存在，可以作为低面数版本
+                    Mesh simplifiedMesh = null;
+                    bool useManualLOD = false;
+
+                    #if UNITY_2018_1_OR_NEWER
+                    if (psr.meshCount > 1)
+                    {
+                        Mesh[] meshes = new Mesh[psr.meshCount];
+                        int actualMeshCount = psr.GetMeshes(meshes);
+
+                        if (actualMeshCount > 1 && meshes[1] != null)
+                        {
+                            Mesh lodMesh = meshes[1];
+
+                            int lodTotalVertices = maxParticles * lodMesh.vertexCount;
+                            if (lodTotalVertices <= vertexLimit * 1.3f) // 弹性判断
+                            {
+                                simplifiedMesh = lodMesh;
+                                useManualLOD = true;
+                                ExportLogger.Log($"LayaAir3D: 检测到手动LOD Mesh (meshes[1]): {lodMesh.name}");
+                                ExportLogger.Log($"  顶点数: {lodMesh.vertexCount}, 总顶点: {lodTotalVertices}");
+                            }
+                            else
+                            {
+                                Debug.LogWarning($"LayaAir3D: meshes[1]的顶点数({lodTotalVertices})仍超限，使用自动简化");
+                            }
+                        }
+                    }
+                    #endif
+
+                    if (!useManualLOD)
+                    {
+                        ExportLogger.Log($"LayaAir3D: 尝试自动简化mesh到 {targetMeshVertexCount} 个顶点...");
+
+                        try
+                        {
+                            simplifiedMesh = MeshSimplifier.SimplifyMesh(
+                                originalMesh,
+                                targetMeshVertexCount,
+                                ExportConfig.ParticleMeshSimplifyQuality
+                            );
+                        }
+                        catch (System.Exception e)
+                        {
+                            Debug.LogError($"LayaAir3D: Mesh简化过程中出现错误: {e.Message}");
+                            simplifiedMesh = null;
+                        }
+                    }
+
+                    // 检查简化后的总顶点数
+                    if (simplifiedMesh != null)
+                    {
+                            int newTotalVertices = maxParticles * simplifiedMesh.vertexCount;
+
+                            // ⭐ 允许适度超限以保证mesh质量
+                            // 根据简化质量参数决定允许超限比例
+                            // quality越高（0.7-1.0），允许超限越多，质量越好
+                            float qualityFactor = ExportConfig.ParticleMeshSimplifyQuality;
+                            float allowedOverrunRatio = 1.0f + qualityFactor * 0.8f; // 0.7质量→允许超出56%
+                            int flexibleLimit = Mathf.CeilToInt(vertexLimit * allowedOverrunRatio);
+                            bool meetsFlexibleLimit = newTotalVertices <= flexibleLimit;
+                            bool meetsStrictLimit = newTotalVertices <= vertexLimit;
+
+                            // 计算简化比例
+                            float reductionPercent = (1.0f - (float)simplifiedMesh.vertexCount / meshVertexCount) * 100;
+
+                            ExportLogger.Log($"LayaAir3D: 简化结果检查");
+                            ExportLogger.Log($"  简化后Mesh顶点数: {simplifiedMesh.vertexCount} (原始: {meshVertexCount}, 减少 {reductionPercent:F1}%)");
+                            ExportLogger.Log($"  总顶点数: {newTotalVertices} (原始: {totalVertexCount})");
+                            ExportLogger.Log($"  严格限制: {vertexLimit}, 满足: {(meetsStrictLimit ? "✓" : "✗")}");
+                            ExportLogger.Log($"  弹性限制: {flexibleLimit} (quality={qualityFactor:F1}, 允许超出{(allowedOverrunRatio-1)*100:F0}%), 满足: {(meetsFlexibleLimit ? "✓" : "✗")}");
+
+                            if (meetsFlexibleLimit)
+                            {
+                                // 保留原始mesh的名称，确保mesh名称一致
+                                simplifiedMesh.name = originalMesh.name;
+
+                                // 替换为简化后的mesh
+                                psr.mesh = simplifiedMesh;
+
+                                // ⭐ 关键修复：如果使用ResoureMap，需要强制更新缓存
+                                if (resoureMap != null)
+                                {
+                                    // 获取原始mesh的路径
+                                    string originalPath = AssetsUtil.GetMeshPath(originalMesh);
+
+                                    // 注册简化mesh实例到原始路径的映射
+                                    resoureMap.RegisterMeshPath(simplifiedMesh, originalPath);
+
+                                    // 移除原始mesh的缓存
+                                    resoureMap.RemoveFileData(originalPath);
+
+                                    // 添加简化后的mesh到ResoureMap（使用原始mesh的路径）
+                                    MeshFile simplifiedMeshFile = new MeshFile(simplifiedMesh, psr, originalPath);
+                                    resoureMap.AddExportFile(simplifiedMeshFile);
+
+                                    ExportLogger.Log($"LayaAir3D: 已更新ResoureMap中的Mesh缓存: {originalPath}");
+                                }
+
+                                string statusIcon = meetsStrictLimit ? "✓" : "⚠";
+                                string statusText = meetsStrictLimit ? "完全满足限制" : "超出严格限制但在可接受范围内";
+
+                                string successMessage = string.Format(
+                                    "{0} 成功简化粒子Mesh\n" +
+                                    "  Mesh顶点: {1} → {2} (减少 {3:F1}%)\n" +
+                                    "  总顶点数: {4} → {5}\n" +
+                                    "  状态: {6}",
+                                    statusIcon,
+                                    meshVertexCount, simplifiedMesh.vertexCount, reductionPercent,
+                                    totalVertexCount, newTotalVertices,
+                                    statusText);
+
+                                ExportLogger.Log($"LayaAir3D: {successMessage}");
+
+                                if (!meetsStrictLimit)
+                                {
+                                    ExportLogger.Log($"LayaAir3D: 提示 - 如需严格满足限制({vertexLimit})，可以:");
+                                    ExportLogger.Log($"  1. 降低简化质量到 0.5-0.6 (当前 {qualityFactor:F1})");
+                                    ExportLogger.Log($"  2. 减少maxParticles到 {suggestedMaxParticles} (当前 {maxParticles})");
+                                    ExportLogger.Log($"  3. 提高顶点数限制到 {newTotalVertices} 以上");
+                                }
+
+                                // 简化成功，不再显示警告
+                                return;
+                            }
+                            else
+                            {
+                                Debug.LogWarning($"LayaAir3D: Mesh简化后仍超出弹性限制");
+                                Debug.LogWarning($"  总顶点数 {newTotalVertices} > 弹性限制 {flexibleLimit}");
+                                Debug.LogWarning($"  建议: 提高简化质量到 0.8-0.9, 或降低maxParticles到 {suggestedMaxParticles}, 或提高顶点限制");
+                            }
+                    }
+                    else
+                    {
+                        Debug.LogWarning("LayaAir3D: Mesh简化返回null，将显示警告");
+                    }
+                }
+
+                // 显示警告（如果没有自动简化或简化失败）
+                if (ExportConfig.ShowParticleMeshWarning)
+                {
+                    string warningMessage = string.Format(
+                        "{0}\n\n" +
+                        "解决方案:\n" +
+                        "1. 将 maxParticles 减少到 {1} 或以下\n" +
+                        "2. 使用顶点数更少的Mesh (目标: ≤{2} 个顶点)\n" +
+                        "3. 启用'自动简化粒子Mesh'选项 (LayaAir导出设置)\n" +
+                        "4. 在导出设置中调整顶点数限制",
+                        problemDescription, suggestedMaxParticles, targetMeshVertexCount);
+
+                    Debug.LogWarning($"LayaAir3D: {warningMessage}");
+
+                    // 在编辑器中显示对话框提醒用户
+                    if (!Application.isBatchMode)
+                    {
+                        EditorUtility.DisplayDialog(
+                            "LayaAir3D 粒子导出警告",
+                            warningMessage,
+                            "我知道了");
+                    }
+                }
+            }
+#endif
+        }
+
+        #endregion
+
         #region Helper Methods
 
         private static int GetCurveType(ParticleSystemCurveMode mode)
@@ -1099,6 +1647,31 @@ namespace LayaExport
             vec.AddField("x", x);
             vec.AddField("y", y);
             return vec;
+        }
+
+        /// <summary>
+        /// 从 MinMaxCurve 获取代表性常量值，支持全部四种模式：
+        /// Constant      → curve.constant
+        /// TwoConstants  → curve.constantMax
+        /// Curve         → curveMultiplier * curve.curve.Evaluate(0f)
+        /// TwoCurves     → curveMultiplier * curve.curveMax.Evaluate(0f)
+        /// 这样可避免 Curve 模式下 .constant 永远返回 0 的问题。
+        /// </summary>
+        private static float EvaluateMinMaxCurveConstant(ParticleSystem.MinMaxCurve curve, float fallback = 0f)
+        {
+            switch (curve.mode)
+            {
+                case ParticleSystemCurveMode.Constant:
+                    return curve.constant;
+                case ParticleSystemCurveMode.TwoConstants:
+                    return curve.constantMax;
+                case ParticleSystemCurveMode.Curve:
+                    return curve.curveMultiplier * curve.curve.Evaluate(0f);
+                case ParticleSystemCurveMode.TwoCurves:
+                    return curve.curveMultiplier * curve.curveMax.Evaluate(0f);
+                default:
+                    return fallback;
+            }
         }
 
         private static JSONObject CreateVector3Object(float x, float y, float z)
@@ -1153,38 +1726,29 @@ namespace LayaExport
             AnimationCurve animCurve = curve.curve;
             if (animCurve == null || animCurve.length == 0)
             {
-                // 创建默认曲线数据
                 animCurve = AnimationCurve.Linear(0, 0, 1, 1);
             }
 
             JSONObject gradientData = new JSONObject(JSONObject.Type.OBJECT);
 
-            // _elements: Float32Array - 每个关键帧2个值: time, value
-            // 根据 Particle.ts 的 init 值: [0, 0, 1, 0, 0, 0, 0, 0] 表示最多4个关键帧
-            List<float> elements = new List<float>();
+            int actualKeyCount;
+            List<float> elements = SampleCurveElements(animCurve, multiplier, out actualKeyCount);
+
+            // 从采样结果中计算 min/max
             float minValue = float.MaxValue;
             float maxValue = float.MinValue;
-
-            foreach (var key in animCurve.keys)
+            for (int i = 0; i < actualKeyCount; i++)
             {
-                float value = key.value * multiplier;
-                elements.Add(key.time);
-                elements.Add(value);
+                float value = elements[i * 2 + 1];
                 minValue = Mathf.Min(minValue, value);
                 maxValue = Mathf.Max(maxValue, value);
             }
 
-            // 填充到8个float (4个关键帧)
-            while (elements.Count < 8)
-                elements.Add(0);
-
             gradientData.AddField("_elements", CreateFloat32Array(elements));
-            gradientData.AddField("_currentLength", animCurve.length * 2);
+            gradientData.AddField("_currentLength", actualKeyCount * 2);
 
-            // 设置曲线范围
             if (minValue == float.MaxValue) minValue = -1;
             if (maxValue == float.MinValue) maxValue = 1;
-            // 确保范围对称或合理
             float absMax = Mathf.Max(Mathf.Abs(minValue), Mathf.Abs(maxValue));
             if (absMax < 1) absMax = 1;
             gradientData.AddField("_curveMin", -absMax);
@@ -1203,22 +1767,19 @@ namespace LayaExport
             if (curveMin != null && curveMin.length > 0)
             {
                 JSONObject gradientDataMin = new JSONObject(JSONObject.Type.OBJECT);
-                List<float> elementsMin = new List<float>();
-                float minVal = float.MaxValue, maxVal = float.MinValue;
+                int actualKeyCount;
+                List<float> elementsMin = SampleCurveElements(curveMin, multiplier, out actualKeyCount);
 
-                foreach (var key in curveMin.keys)
+                float minVal = float.MaxValue, maxVal = float.MinValue;
+                for (int i = 0; i < actualKeyCount; i++)
                 {
-                    float value = key.value * multiplier;
-                    elementsMin.Add(key.time);
-                    elementsMin.Add(value);
+                    float value = elementsMin[i * 2 + 1];
                     minVal = Mathf.Min(minVal, value);
                     maxVal = Mathf.Max(maxVal, value);
                 }
-                while (elementsMin.Count < 8)
-                    elementsMin.Add(0);
 
                 gradientDataMin.AddField("_elements", CreateFloat32Array(elementsMin));
-                gradientDataMin.AddField("_currentLength", curveMin.length * 2);
+                gradientDataMin.AddField("_currentLength", actualKeyCount * 2);
 
                 float absMax = Mathf.Max(Mathf.Abs(minVal), Mathf.Abs(maxVal));
                 if (absMax < 1) absMax = 1;
@@ -1233,22 +1794,19 @@ namespace LayaExport
             if (curveMax != null && curveMax.length > 0)
             {
                 JSONObject gradientDataMax = new JSONObject(JSONObject.Type.OBJECT);
-                List<float> elementsMax = new List<float>();
-                float minVal = float.MaxValue, maxVal = float.MinValue;
+                int actualKeyCount;
+                List<float> elementsMax = SampleCurveElements(curveMax, multiplier, out actualKeyCount);
 
-                foreach (var key in curveMax.keys)
+                float minVal = float.MaxValue, maxVal = float.MinValue;
+                for (int i = 0; i < actualKeyCount; i++)
                 {
-                    float value = key.value * multiplier;
-                    elementsMax.Add(key.time);
-                    elementsMax.Add(value);
+                    float value = elementsMax[i * 2 + 1];
                     minVal = Mathf.Min(minVal, value);
                     maxVal = Mathf.Max(maxVal, value);
                 }
-                while (elementsMax.Count < 8)
-                    elementsMax.Add(0);
 
                 gradientDataMax.AddField("_elements", CreateFloat32Array(elementsMax));
-                gradientDataMax.AddField("_currentLength", curveMax.length * 2);
+                gradientDataMax.AddField("_currentLength", actualKeyCount * 2);
 
                 float absMax = Mathf.Max(Mathf.Abs(minVal), Mathf.Abs(maxVal));
                 if (absMax < 1) absMax = 1;
@@ -1284,19 +1842,11 @@ namespace LayaExport
             JSONObject gradientData = new JSONObject(JSONObject.Type.OBJECT);
             gradientData.AddField("_$type", "GradientDataNumber");
 
-            List<float> elements = new List<float>();
-            foreach (var key in animCurve.keys)
-            {
-                float value = key.value * multiplier;
-                elements.Add(key.time);
-                elements.Add(value);
-            }
-
-            while (elements.Count < 8)
-                elements.Add(0);
+            int actualKeyCount;
+            List<float> elements = SampleCurveElements(animCurve, multiplier, out actualKeyCount);
 
             gradientData.AddField("_elements", CreateFloat32Array(elements));
-            gradientData.AddField("_currentLength", animCurve.length * 2);
+            gradientData.AddField("_currentLength", actualKeyCount * 2);
 
             parent.AddField(fieldName, gradientData);
         }
@@ -1311,19 +1861,12 @@ namespace LayaExport
             {
                 JSONObject gradientDataMin = new JSONObject(JSONObject.Type.OBJECT);
                 gradientDataMin.AddField("_$type", "GradientDataNumber");
-                List<float> elementsMin = new List<float>();
 
-                foreach (var key in curveMin.keys)
-                {
-                    float value = key.value * multiplier;
-                    elementsMin.Add(key.time);
-                    elementsMin.Add(value);
-                }
-                while (elementsMin.Count < 8)
-                    elementsMin.Add(0);
+                int actualKeyCount;
+                List<float> elementsMin = SampleCurveElements(curveMin, multiplier, out actualKeyCount);
 
                 gradientDataMin.AddField("_elements", CreateFloat32Array(elementsMin));
-                gradientDataMin.AddField("_currentLength", curveMin.length * 2);
+                gradientDataMin.AddField("_currentLength", actualKeyCount * 2);
 
                 parent.AddField(minFieldName, gradientDataMin);
             }
@@ -1333,19 +1876,12 @@ namespace LayaExport
             {
                 JSONObject gradientDataMax = new JSONObject(JSONObject.Type.OBJECT);
                 gradientDataMax.AddField("_$type", "GradientDataNumber");
-                List<float> elementsMax = new List<float>();
 
-                foreach (var key in curveMax.keys)
-                {
-                    float value = key.value * multiplier;
-                    elementsMax.Add(key.time);
-                    elementsMax.Add(value);
-                }
-                while (elementsMax.Count < 8)
-                    elementsMax.Add(0);
+                int actualKeyCount;
+                List<float> elementsMax = SampleCurveElements(curveMax, multiplier, out actualKeyCount);
 
                 gradientDataMax.AddField("_elements", CreateFloat32Array(elementsMax));
-                gradientDataMax.AddField("_currentLength", curveMax.length * 2);
+                gradientDataMax.AddField("_currentLength", actualKeyCount * 2);
 
                 parent.AddField(maxFieldName, gradientDataMax);
             }
@@ -1398,6 +1934,52 @@ namespace LayaExport
             gradientObj.AddField("_colorRGBKeysCount", gradient.colorKeys.Length);
 
             parent.AddField(fieldName, gradientObj);
+        }
+
+        /// <summary>
+        /// Laya GradientDataNumber._dataBuffer = new Float32Array(8)，最多4个关键帧。
+        /// 当 Unity AnimationCurve 关键帧超过4个时，均匀采样4个点保留曲线形状。
+        /// </summary>
+        private const int MAX_GRADIENT_KEYFRAMES = 4;
+        private const int MAX_GRADIENT_ELEMENTS = MAX_GRADIENT_KEYFRAMES * 2; // 8
+
+        private static List<float> SampleCurveElements(AnimationCurve animCurve, float multiplier, out int actualKeyCount)
+        {
+            List<float> elements = new List<float>();
+
+            if (animCurve.length <= MAX_GRADIENT_KEYFRAMES)
+            {
+                actualKeyCount = animCurve.length;
+                foreach (var key in animCurve.keys)
+                {
+                    elements.Add(key.time);
+                    elements.Add(key.value * multiplier);
+                }
+            }
+            else
+            {
+                // 关键帧超过限制，均匀采样4个点（首尾精确，中间插值）
+                actualKeyCount = MAX_GRADIENT_KEYFRAMES;
+                float startTime = animCurve.keys[0].time;
+                float endTime = animCurve.keys[animCurve.length - 1].time;
+
+                for (int i = 0; i < MAX_GRADIENT_KEYFRAMES; i++)
+                {
+                    float t = (float)i / (MAX_GRADIENT_KEYFRAMES - 1);
+                    float time = Mathf.Lerp(startTime, endTime, t);
+                    float value = animCurve.Evaluate(time) * multiplier;
+                    elements.Add(time);
+                    elements.Add(value);
+                }
+
+                Debug.LogWarning($"LayaAir3D: AnimationCurve has {animCurve.length} keyframes, exceeds GradientDataNumber limit of {MAX_GRADIENT_KEYFRAMES}. Resampled to {MAX_GRADIENT_KEYFRAMES} points.");
+            }
+
+            // 填充到8个float
+            while (elements.Count < MAX_GRADIENT_ELEMENTS)
+                elements.Add(0);
+
+            return elements;
         }
 
         /// <summary>

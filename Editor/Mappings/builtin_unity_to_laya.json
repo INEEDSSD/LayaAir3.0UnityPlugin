@@ -1,0 +1,626 @@
+{
+  "version": "1.0.0",
+  "name": "Unity to LayaAir Builtin Mappings",
+  "description": "内置的Unity Shader到LayaAir转换映射规则",
+
+  "mappings": {
+    "types": [
+      {
+        "from": "float4",
+        "to": "vec4",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL float4 到 GLSL vec4"
+      },
+      {
+        "from": "float3",
+        "to": "vec3",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL float3 到 GLSL vec3"
+      },
+      {
+        "from": "float2",
+        "to": "vec2",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL float2 到 GLSL vec2"
+      },
+      {
+        "from": "half4",
+        "to": "vec4",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL half4 到 GLSL vec4"
+      },
+      {
+        "from": "half3",
+        "to": "vec3",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL half3 到 GLSL vec3"
+      },
+      {
+        "from": "half2",
+        "to": "vec2",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL half2 到 GLSL vec2"
+      },
+      {
+        "from": "half",
+        "to": "float",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL half 到 GLSL float"
+      },
+      {
+        "from": "fixed4",
+        "to": "vec4",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL fixed4 到 GLSL vec4"
+      },
+      {
+        "from": "fixed3",
+        "to": "vec3",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL fixed3 到 GLSL vec3"
+      },
+      {
+        "from": "fixed2",
+        "to": "vec2",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL fixed2 到 GLSL vec2"
+      },
+      {
+        "from": "fixed",
+        "to": "float",
+        "context": "all",
+        "priority": 100,
+        "description": "HLSL fixed 到 GLSL float"
+      }
+    ],
+
+    "functions": [
+      {
+        "from": "tex2D({0}, {1})",
+        "to": "texture2D({0}, {1})",
+        "context": "fragment",
+        "priority": 100,
+        "description": "纹理采样函数"
+      },
+      {
+        "from": "tex2Dlod({0}, {1})",
+        "to": "texture2DLodEXT({0}, {1}.xy, {1}.w)",
+        "context": "all",
+        "priority": 100,
+        "description": "带LOD的纹理采样"
+      },
+      {
+        "from": "texCUBE({0}, {1})",
+        "to": "textureCube({0}, {1})",
+        "context": "fragment",
+        "priority": 100,
+        "description": "立方体纹理采样"
+      },
+      {
+        "from": "lerp({0}, {1}, {2})",
+        "to": "mix({0}, {1}, {2})",
+        "context": "all",
+        "priority": 100,
+        "description": "线性插值"
+      },
+      {
+        "from": "frac({0})",
+        "to": "fract({0})",
+        "context": "all",
+        "priority": 100,
+        "description": "小数部分"
+      },
+      {
+        "from": "saturate({0})",
+        "to": "clamp({0}, 0.0, 1.0)",
+        "context": "all",
+        "priority": 100,
+        "description": "饱和度夹紧"
+      },
+      {
+        "from": "atan2({0}, {1})",
+        "to": "atan({0}, {1})",
+        "context": "all",
+        "priority": 100,
+        "description": "反正切函数"
+      },
+      {
+        "from": "ddx({0})",
+        "to": "dFdx({0})",
+        "context": "fragment",
+        "priority": 100,
+        "description": "X方向偏导数"
+      },
+      {
+        "from": "ddy({0})",
+        "to": "dFdy({0})",
+        "context": "fragment",
+        "priority": 100,
+        "description": "Y方向偏导数"
+      },
+      {
+        "from": "clip({0})",
+        "to": "if (({0}) < 0.0) discard",
+        "context": "fragment",
+        "priority": 100,
+        "description": "裁剪函数"
+      },
+      {
+        "from": "mul({0}, {1})",
+        "to": "({0} * {1})",
+        "context": "all",
+        "priority": 100,
+        "description": "矩阵/向量乘法"
+      }
+    ],
+
+    "variables": [
+      {
+        "from": "_Time",
+        "to": "vec4(u_CurrentTime * 0.05, u_CurrentTime, u_CurrentTime * 2.0, u_CurrentTime * 3.0)",
+        "context": "all",
+        "priority": 100,
+        "description": "Unity时间变量"
+      },
+      {
+        "from": "_WorldSpaceCameraPos",
+        "to": "u_CameraPos",
+        "context": "all",
+        "priority": 100,
+        "description": "相机世界空间位置"
+      },
+      {
+        "from": "_ProjectionParams",
+        "to": "u_ProjectionParams",
+        "context": "all",
+        "priority": 100,
+        "description": "投影参数"
+      },
+      {
+        "from": "_ScreenParams",
+        "to": "u_ScreenParams",
+        "context": "all",
+        "priority": 100,
+        "description": "屏幕参数"
+      },
+      {
+        "from": "_ZBufferParams",
+        "to": "u_ZBufferParams",
+        "context": "all",
+        "priority": 100,
+        "description": "深度缓冲参数"
+      }
+    ],
+
+    "patterns": [
+      {
+        "name": "unity_matrix_mvp",
+        "pattern": "UNITY_MATRIX_MVP",
+        "replacement": "(u_Projection * u_View * u_World)",
+        "context": "vertex",
+        "priority": 90,
+        "description": "Unity MVP矩阵"
+      },
+      {
+        "name": "unity_matrix_mv",
+        "pattern": "UNITY_MATRIX_MV",
+        "replacement": "(u_View * u_World)",
+        "context": "vertex",
+        "priority": 90,
+        "description": "Unity MV矩阵"
+      },
+      {
+        "name": "unity_matrix_v",
+        "pattern": "UNITY_MATRIX_V",
+        "replacement": "u_View",
+        "context": "all",
+        "priority": 90,
+        "description": "Unity View矩阵"
+      },
+      {
+        "name": "unity_matrix_p",
+        "pattern": "UNITY_MATRIX_P",
+        "replacement": "u_Projection",
+        "context": "all",
+        "priority": 90,
+        "description": "Unity Projection矩阵"
+      },
+      {
+        "name": "unity_matrix_it_mv",
+        "pattern": "UNITY_MATRIX_IT_MV",
+        "replacement": "transpose(inverse(u_View * u_World))",
+        "context": "vertex",
+        "priority": 90,
+        "description": "Unity inverse-transpose MV矩阵"
+      }
+    ],
+
+    "includes": [
+      {
+        "from": "#include \"UnityCG.cginc\"",
+        "to": [
+          "#include \"Camera.glsl\";",
+          "#include \"Scene.glsl\";",
+          "#include \"Math.glsl\";"
+        ],
+        "context": "all",
+        "priority": 100
+      },
+      {
+        "from": "#include \"AutoLight.cginc\"",
+        "to": [
+          "#include \"Scene.glsl\";",
+          "#include \"ShadowHelper.glsl\";"
+        ],
+        "context": "all",
+        "priority": 100
+      },
+      {
+        "from": "#include \"Lighting.cginc\"",
+        "to": [
+          "#include \"Scene.glsl\";",
+          "#include \"PBRCore.glsl\";"
+        ],
+        "context": "all",
+        "priority": 100
+      }
+    ],
+
+    "particle_mappings": {
+      "variables": [
+        {
+          "from": "_MainTex",
+          "to": "u_AlbedoTexture",
+          "context": "particle",
+          "description": "粒子主纹理"
+        },
+        {
+          "from": "_MainTex_ST",
+          "to": "u_TilingOffset",
+          "context": "particle",
+          "description": "粒子纹理Tiling/Offset"
+        },
+        {
+          "from": "_TintColor",
+          "to": "u_LayerColor",
+          "context": "particle",
+          "description": "粒子颜色"
+        },
+        {
+          "from": "_LayerColor",
+          "to": "u_LayerColor",
+          "context": "particle",
+          "description": "图层颜色"
+        },
+        {
+          "from": "_LayerMultiplier",
+          "to": "u_LayerMultiplier",
+          "context": "particle",
+          "description": "图层强度"
+        },
+        {
+          "from": "_Alpha",
+          "to": "u_Alpha",
+          "context": "particle",
+          "description": "粒子透明度"
+        },
+        {
+          "from": "_UVScrollTex",
+          "to": "u_UVScrollTex",
+          "context": "particle",
+          "description": "主纹理UV滚动速度(xy分量)",
+          "role": "uv_scroll_vector"
+        },
+        {
+          "from": "_UVScrollMask",
+          "to": "u_UVScrollMask",
+          "context": "particle",
+          "description": "Mask纹理UV滚动速度(xy分量)",
+          "role": "uv_scroll_vector"
+        },
+        {
+          "from": "_DetailTex",
+          "to": "u_DetailTex",
+          "context": "particle",
+          "description": "第一层Detail纹理（对应 LAYERTYPE_TWO define）"
+        },
+        {
+          "from": "_DetailTex2",
+          "to": "u_DetailTex2",
+          "context": "particle",
+          "description": "第二层Detail纹理（对应 LAYERTYPE_THREE define）"
+        },
+        {
+          "from": "_DistortTex",
+          "to": "u_DistortTex",
+          "context": "particle",
+          "description": "扭曲纹理（对应 USEDISTORT0 define）"
+        },
+        {
+          "from": "_RimMap",
+          "to": "u_RimMap",
+          "context": "particle",
+          "description": "边缘光贴图（对应 USERIMMAP define）"
+        },
+        {
+          "from": "_GradientMap",
+          "to": "u_GradientMap",
+          "context": "particle",
+          "description": "渐变贴图（对应 USEGRADIENTMAP0 define）"
+        },
+        {
+          "from": "_VertexAmplitudeTex",
+          "to": "u_VertexAmplitudeTex",
+          "context": "particle",
+          "description": "顶点振幅纹理（对应 USEVERTEXOFFSET define）"
+        },
+        {
+          "from": "_Scroll0X",
+          "to": "u_Scroll0X",
+          "context": "particle",
+          "description": "Layer0主纹理X轴滚动速度（float分量型UV滚动）"
+        },
+        {
+          "from": "_Scroll0Y",
+          "to": "u_Scroll0Y",
+          "context": "particle",
+          "description": "Layer0主纹理Y轴滚动速度（float分量型UV滚动）"
+        },
+        {
+          "from": "_Scroll1X",
+          "to": "u_Scroll1X",
+          "context": "particle",
+          "description": "Layer1纹理X轴滚动速度"
+        },
+        {
+          "from": "_Scroll1Y",
+          "to": "u_Scroll1Y",
+          "context": "particle",
+          "description": "Layer1纹理Y轴滚动速度"
+        },
+        {
+          "from": "_Scroll2X",
+          "to": "u_Scroll2X",
+          "context": "particle",
+          "description": "Layer2纹理X轴滚动速度"
+        },
+        {
+          "from": "_Scroll2Y",
+          "to": "u_Scroll2Y",
+          "context": "particle",
+          "description": "Layer2纹理Y轴滚动速度"
+        },
+        {
+          "from": "_UVScroll",
+          "to": "u_UVScroll",
+          "context": "particle",
+          "description": "Effect_Basic 系列的 UV 滚动速度（float2）"
+        }
+      ],
+
+      "effect_behaviors": {
+        "description": "特效shader行为组 - 用于驱动代码生成逻辑，避免硬编码字符串",
+        "uv_scroll_vector": {
+          "description": "Vector4型UV滚动属性：xy分量表示滚动速度，由u_Time驱动。匹配 particle_mappings.variables 中 role=uv_scroll_vector 的条目",
+          "laya_names": ["u_UVScrollTex", "u_UVScrollMask"]
+        },
+        "uv_scroll_float": {
+          "description": "float分量型UV滚动属性名匹配模式（用于兼容 _Scroll0X/_Scroll0Y 等系列）",
+          "name_patterns": ["Scroll"]
+        }
+      },
+      "includes": [
+        {
+          "from": "#include \"UnityCG.cginc\"",
+          "to": [
+            "#include \"Camera.glsl\";",
+            "#include \"particleShuriKenSpriteVS.glsl\";",
+            "#include \"Math.glsl\";",
+            "#include \"MathGradient.glsl\";",
+            "#include \"Color.glsl\";",
+            "#include \"Scene.glsl\";",
+            "#include \"SceneFogInput.glsl\";"
+          ],
+          "context": "particle_vertex",
+          "description": "粒子顶点shader includes"
+        },
+        {
+          "from": "#include \"UnityCG.cginc\"",
+          "to": [
+            "#include \"Scene.glsl\";",
+            "#include \"SceneFog.glsl\";",
+            "#include \"Color.glsl\";",
+            "#include \"Camera.glsl\";"
+          ],
+          "context": "particle_fragment",
+          "description": "粒子片段shader includes"
+        }
+      ],
+      "defines": [
+        {
+          "from": "_LAYERTYPE_TWO",
+          "to": "LAYERTYPE_TWO",
+          "description": "双层纹理"
+        },
+        {
+          "from": "_LAYERTYPE_THREE",
+          "to": "LAYERTYPE_THREE",
+          "description": "三层纹理"
+        },
+        {
+          "from": "_USEDISTORT0_ON",
+          "to": "USEDISTORT0",
+          "description": "使用扭曲0"
+        },
+        {
+          "from": "_USEDISSOLVE_ON",
+          "to": "USEDISSOLVE",
+          "description": "使用溶解"
+        },
+        {
+          "from": "_USEFADEEDGE_ON",
+          "to": "USEFADEEDGE",
+          "description": "使用淡入淡出边缘"
+        },
+        {
+          "from": "_USERIM_ON",
+          "to": "USERIM",
+          "description": "使用边缘光"
+        },
+        {
+          "from": "_USELIGHTING_ON",
+          "to": "USELIGHTING",
+          "description": "使用光照"
+        },
+        {
+          "from": "_ROTATIONTEX_ON",
+          "to": "ROTATIONTEX",
+          "description": "纹理旋转"
+        },
+        {
+          "from": "_USEPOLAR_ON",
+          "to": "USEPOLAR",
+          "description": "使用极坐标"
+        }
+      ]
+    },
+
+    "custom_functions": [],
+
+    "shader_feature_inferences": {
+      "description": "从shader属性名自动推断GLSL #define宏的规则（对应 CustomShaderExporter.cs FeatureInferenceRules 数组）。修改 C# 数组与此节保持同步。",
+      "rules": [
+        {
+          "name": "layer_type_three",
+          "patterns": ["detailtex2"],
+          "defines": ["LAYERTYPE_THREE", "LAYERTYPE_TWO", "LAYERTYPE_ONE"],
+          "note": "detailtex2必须排在detailtex之前，exclude=detailtex2保证互斥"
+        },
+        {
+          "name": "layer_type_two",
+          "patterns": ["detailtex"],
+          "exclude": "detailtex2",
+          "defines": ["LAYERTYPE_TWO", "LAYERTYPE_ONE"]
+        },
+        {
+          "name": "dissolve",
+          "patterns": ["dissolve"],
+          "defines": ["USEDISSOLVE"]
+        },
+        {
+          "name": "fade_edge",
+          "patterns": ["fadeedge"],
+          "defines": ["USEFADEEDGE"]
+        },
+        {
+          "name": "dissolve_distort",
+          "patterns": ["dissolvedistort"],
+          "defines": ["USEDISSOLVEDISTORT"]
+        },
+        {
+          "name": "distort",
+          "patterns": ["distorttex"],
+          "exclude": "dissolve",
+          "defines": ["USEDISTORT0"]
+        },
+        {
+          "name": "rim",
+          "patterns": ["rim"],
+          "defines": ["USERIM"]
+        },
+        {
+          "name": "rim_map",
+          "patterns": ["rimmap"],
+          "exclude": "mask",
+          "defines": ["USERIMMAP"]
+        },
+        {
+          "name": "lighting",
+          "patterns": ["effectmainlight", "lighting"],
+          "defines": ["USELIGHTING"]
+        },
+        {
+          "name": "vertex_offset",
+          "patterns": ["vertexoffset", "vertexamplitude"],
+          "defines": ["USEVERTEXOFFSET"]
+        },
+        {
+          "name": "polar",
+          "patterns": ["polar"],
+          "defines": ["USEPOLAR"]
+        },
+        {
+          "name": "gradient_map",
+          "patterns": ["gradientmap"],
+          "defines": ["USEGRADIENTMAP0"]
+        },
+        {
+          "name": "normal_map_for_rim",
+          "patterns": ["normaltexture"],
+          "defines": ["USENORMALMAPFORRIM"],
+          "note": "normalmap+rim的AND组合通过独立特殊规则处理，见C#代码中的注释"
+        },
+        {
+          "name": "custom_data",
+          "patterns": ["customdata"],
+          "defines": ["USECUSTOMDATA"]
+        },
+        {
+          "name": "wrap_mode",
+          "patterns": ["wrapmode"],
+          "defines": ["WRAPMODE_CLAMP", "WRAPMODE_REPEAT"]
+        },
+        {
+          "name": "npr",
+          "patterns": ["medcolor", "shadowthreshold"],
+          "defines": ["USENPR"]
+        },
+        {
+          "name": "emission",
+          "patterns": ["emission"],
+          "defines": ["EMISSION"]
+        },
+        {
+          "name": "swirl",
+          "patterns": ["swirl"],
+          "defines": ["SWIRL"],
+          "note": "漩涡效果（AParticleShader 有预转换模板故规则不实际生效，为完备性添加）"
+        },
+        {
+          "name": "use_mask",
+          "patterns": ["use_mask", "usemask"],
+          "defines": ["USE_MASK"]
+        }
+      ],
+      "special_rules": [
+        {
+          "name": "rotation_variants",
+          "description": "旋转纹理按属性名中数字后缀区分层数，属于变体分支逻辑，保留为C#代码特殊块",
+          "pattern": "rotateangle",
+          "variants": {
+            "02": "ROTATIONTEXTWO",
+            "03": "ROTATIONTEXTHREE",
+            "04": "ROTATIONTEXFOUR",
+            "default": "ROTATIONTEX"
+          }
+        },
+        {
+          "name": "normalmap_rim_combination",
+          "description": "normalmap AND rim 属性名组合（如_RimNormalMap），属于AND条件规则",
+          "requires_all": ["normalmap", "rim"],
+          "defines": ["USENORMALMAPFORRIM"]
+        }
+      ]
+    }
+  }
+}

@@ -11,5 +11,11 @@
   <CustomizeDirectory>False</CustomizeDirectory>
   <CustomizeDirectoryName>
   </CustomizeDirectoryName>
-  <SavePath>Choose Your Path !!!</SavePath>
+  <SavePath>Choose your path!!!</SavePath>
+  <EnableCustomShaderExport>True</EnableCustomShaderExport>
+  <AutoSimplifyParticleMesh>False</AutoSimplifyParticleMesh>
+  <ParticleMeshMaxVertices>70000</ParticleMeshMaxVertices>
+  <ParticleMeshSimplifyQuality>0.7</ParticleMeshSimplifyQuality>
+  <ShowParticleMeshWarning>True</ShowParticleMeshWarning>
+  <EnableDebugLog>False</EnableDebugLog>
 </LayaExportSetting>
