@@ -284,7 +284,7 @@ internal class NodeMap
         }
         else
         {*/
-           
+
             JSONObject overrideIndex = new JSONObject(JSONObject.Type.ARRAY);
             foreach (var index in outIndex)
             {
@@ -292,7 +292,20 @@ internal class NodeMap
             }
             data.AddField("_$ref", overrideIndex);
       /*  }*/
-        
+
+        return data;
+    }
+
+    /// <summary>
+    /// 获取引用节点 JSON (带组件类型过滤, CPU 粒子 ExternalForces 需要)
+    /// </summary>
+    public JSONObject getRefNodeIdObjet(GameObject gameObject, string componentType)
+    {
+        JSONObject data = this.getRefNodeIdObjet(gameObject);
+        if (!string.IsNullOrEmpty(componentType))
+        {
+            JsonUtils.SetComponentsType(data, componentType);
+        }
         return data;
     }
 

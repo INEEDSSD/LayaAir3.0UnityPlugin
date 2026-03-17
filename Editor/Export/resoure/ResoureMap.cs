@@ -375,12 +375,37 @@ internal class ResoureMap
         }
         else if(comp is ParticleSystem)
         {
-            // 粒子系统导出 - 使用新版粒子导出器，传递ResoureMap以正确导出材质
-            JSONObject particleComp = LayaParticleExportV2.ExportParticleSystemV2(gameObject, this);
-            if (particleComp != null)
+            int mode = GetParticleExportMode(gameObject);
+            if (mode == 0) // Shuriken (GPU)
             {
-                compents.Add(particleComp);
+                JSONObject particleComp = LayaParticleExportV2.ExportParticleSystemV2(gameObject, this);
+                if (particleComp != null)
+                {
+                    compents.Add(particleComp);
+                }
             }
+            // CPU 模式: ParticleSystem 阶段不处理, 延迟到 ParticleSystemRenderer 阶段
+        }
+        else if (comp is ParticleSystemRenderer)
+        {
+            int mode = GetParticleExportMode(gameObject);
+            if (mode == 1) // CPU Particle
+            {
+                ParticleSystem ps = gameObject.GetComponent<ParticleSystem>();
+                if (ps != null)
+                {
+                    JSONObject particleSystemData = ParticleSystemData.GetParticleSystem(ps, isOverride, map, this);
+                    compents.Add(particleSystemData);
+                    ParticleSystemData.GetParticleSystemRenderer(comp as ParticleSystemRenderer, isOverride, this, particleSystemData);
+                }
+            }
+            // Shuriken 模式: 已在 ParticleSystem 阶段完成, 此处跳过
+        }
+        else if (comp is ParticleSystemForceField)
+        {
+            // 力场组件仅在 CPU 粒子模式下有意义
+            compents.Add(ParticleSystemForceFieldData.GetParticleSystemForceField(
+                comp as ParticleSystemForceField, isOverride, map, this));
         }
         else if (comp is SpriteRenderer)
         {
@@ -1088,5 +1113,29 @@ internal class ResoureMap
             }
         }
         return materFiledata;
+    }
+
+    /// <summary>
+    /// 获取 Mesh 的 JSON 引用数据 (uuid), CPU 粒子导出需要
+    /// </summary>
+    public JSONObject GetMeshData(Mesh mesh, Renderer renderer)
+    {
+        MeshFile meshFile = this.GetMeshFile(mesh, renderer);
+        JSONObject meshData = new JSONObject(JSONObject.Type.OBJECT);
+        meshData.AddField("_$uuid", meshFile.uuid);
+        meshData.AddField("_$type", "Mesh");
+        return meshData;
+    }
+
+    /// <summary>
+    /// 获取指定 GameObject 的粒子导出模式
+    /// 优先使用 Object 上的 LayaParticleExportSetting 组件, 否则使用全局默认
+    /// </summary>
+    private static int GetParticleExportMode(GameObject gameObject)
+    {
+        var setting = gameObject.GetComponent<LayaParticleExportSetting>();
+        if (setting != null)
+            return (int)setting.exportMode;
+        return ExportConfig.ParticleExportMode;
     }
 }

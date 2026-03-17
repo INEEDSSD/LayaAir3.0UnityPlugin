@@ -38,6 +38,9 @@ public class ExportConfig
     private static float _ParticleMeshSimplifyQuality = 0.7f; // 0-1之间，越高质量越好
     private static bool _ShowParticleMeshWarning = true;
 
+    // 粒子系统默认导出模式: 0=Shuriken(GPU), 1=CPU Particle
+    private static int _ParticleExportMode = 0;
+
     //启用调试日志输出
     private static bool _EnableDebugLog = false;
 
@@ -258,6 +261,23 @@ public class ExportConfig
         }
     }
 
+    /// <summary>
+    /// 粒子系统默认导出模式: 0=ShurikenParticle(GPU), 1=CPUParticle
+    /// 单个物体可通过 LayaParticleExportSetting 组件覆盖此全局值
+    /// </summary>
+    public static int ParticleExportMode
+    {
+        get { return _ParticleExportMode; }
+        set
+        {
+            if (_ParticleExportMode != value)
+            {
+                _ParticleExportMode = value;
+                _updateConfig = true;
+            }
+        }
+    }
+
     //是否启用调试日志
     public static bool EnableDebugLog
     {
@@ -322,6 +342,10 @@ public class ExportConfig
         if (xn.SelectSingleNode("ShowParticleMeshWarning") != null)
             ShowParticleMeshWarning = bool.Parse(xn.SelectSingleNode("ShowParticleMeshWarning").InnerText);
 
+        // 粒子导出模式配置
+        if (xn.SelectSingleNode("ParticleExportMode") != null)
+            ParticleExportMode = int.Parse(xn.SelectSingleNode("ParticleExportMode").InnerText);
+
         // 调试日志配置
         if (xn.SelectSingleNode("EnableDebugLog") != null)
             EnableDebugLog = bool.Parse(xn.SelectSingleNode("EnableDebugLog").InnerText);
@@ -367,6 +391,10 @@ public class ExportConfig
 
         if (xn.SelectSingleNode("ShowParticleMeshWarning") != null)
             xn.SelectSingleNode("ShowParticleMeshWarning").InnerText = ShowParticleMeshWarning.ToString();
+
+        // 粒子导出模式配置
+        if (xn.SelectSingleNode("ParticleExportMode") != null)
+            xn.SelectSingleNode("ParticleExportMode").InnerText = ParticleExportMode.ToString();
 
         // 调试日志配置
         if (xn.SelectSingleNode("EnableDebugLog") != null)
