@@ -990,10 +990,29 @@ namespace LayaExport
                 case ParticleSystemShapeType.ConeVolume:
                 case ParticleSystemShapeType.ConeVolumeShell:
                     // ConeShape: angleDEG(default=25), radius(default=1), length(default=5), emitType(default=0), randomDirection(default=0)
-                    if (shape.angle != 25)
-                        shapeObj.AddField("angleDEG", shape.angle);
-                    if (shape.radius != 1)
-                        shapeObj.AddField("radius", shape.radius);
+                    // Unity Shape.scale 会影响锥体几何形状，LayaAir ConeShape 无 scale 参数，需转换到 angleDEG/radius 上
+                    // scale.z 压缩锥体轴向分量: effectiveAngle = atan2(sin(angle), cos(angle) * scaleZ)
+                    // scale.x/y 缩放底面圆: effectiveRadius = radius * avg(scaleX, scaleY)
+                    float coneAngle = shape.angle;
+                    float coneRadius = shape.radius;
+                    Vector3 coneScale = shape.scale;
+                    if (coneScale.z != 1f || coneScale.x != 1f || coneScale.y != 1f)
+                    {
+                        if (coneScale.z != 1f)
+                        {
+                            float angleRad = coneAngle * Mathf.Deg2Rad;
+                            coneAngle = Mathf.Atan2(Mathf.Sin(angleRad), Mathf.Cos(angleRad) * Mathf.Abs(coneScale.z)) * Mathf.Rad2Deg;
+                        }
+                        if (coneScale.x != 1f || coneScale.y != 1f)
+                        {
+                            coneRadius = shape.radius * (coneScale.x + coneScale.y) * 0.5f;
+                        }
+                        Debug.Log($"LayaAir3D: ConeShape scale({coneScale.x}, {coneScale.y}, {coneScale.z}) 已转换 → angleDEG: {shape.angle}→{coneAngle:F1}, radius: {shape.radius}→{coneRadius:F3}");
+                    }
+                    if (coneAngle != 25)
+                        shapeObj.AddField("angleDEG", coneAngle);
+                    if (coneRadius != 1)
+                        shapeObj.AddField("radius", coneRadius);
                     if (shape.length != 5)
                         shapeObj.AddField("length", shape.length);
                     // emitType: 0=Base, 1=BaseShell, 2=Volume, 3=VolumeShell

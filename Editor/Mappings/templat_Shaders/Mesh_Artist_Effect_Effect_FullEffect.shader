@@ -1,7 +1,7 @@
 Shader3D Start
 {
     type:Shader3D,
-    name: "Mesh_FullEffect",
+    name: "Mesh_Artist_Effect_Effect_FullEffect",
     enableInstancing:true,
     supportReflectionProbe:false,
     shaderType:D3,

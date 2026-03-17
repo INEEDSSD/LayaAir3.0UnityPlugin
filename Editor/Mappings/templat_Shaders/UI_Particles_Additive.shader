@@ -20,7 +20,17 @@ Shader3D Start
         {
             pipeline:Forward,
             VS:UI_Particles_AdditiveVS,
-            FS:UI_Particles_AdditiveFS
+            FS:UI_Particles_AdditiveFS,
+            statefirst: true,
+            renderState: {
+                blend: "Seperate",
+                blendEquationRGB: "Add",
+                blendEquationAlpha: "Add",
+                srcBlendRGB: "SourceAlpha",
+                dstBlendRGB: "One",
+                srcBlendAlpha: "SourceAlpha",
+                dstBlendAlpha: "One"
+            }
         }
     ]
 }
@@ -63,8 +73,10 @@ GLSL Start
     {
         clip();
         vec4 textureColor = texture2D(u_baseRender2DTexture, v_texcoord);
-        // Unity: output = vertex_color * TintColor * texture
-        gl_FragColor = v_color * u_TintColor * textureColor;
+        // Fix Laya linear space: convert texture and TintColor back to gamma
+        textureColor = vec4(linearToGamma(textureColor.rgb), linearToGamma(vec3(textureColor.a, 0.0, 0.0)).r);
+        vec4 tint = vec4(linearToGamma(u_TintColor.rgb), linearToGamma(vec3(u_TintColor.a, 0.0, 0.0)).r);
+        gl_FragColor = v_color * tint * textureColor;
     }
 
 #endGLSL

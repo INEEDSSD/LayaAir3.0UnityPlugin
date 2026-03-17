@@ -554,23 +554,38 @@ internal class CustomShaderExporter
         // 生成LayaAir Shader名称（去除路径分隔符，转换为合法名称）
         string baseLayaShaderName = GenerateLayaShaderName(shaderName);
 
-        // ★ 如果基础名称存在预转换模板，优先使用模板（不添加类型后缀）
-        string typeSuffix = "";
-        if (TryLoadPreConvertedTemplate(baseLayaShaderName) != null)
-        {
-            ExportLogger.Log($"LayaAir3D: Found pre-converted template for '{baseLayaShaderName}', using template directly (skip type suffix)");
-        }
-        else
-        {
-            // 无模板时，根据 renderer 类型添加后缀，区分 D3/Effect 版本
-            typeSuffix = GetShaderTypeSuffix(materialFile);
-        }
+        // ★ 根据 renderer 类型和模板存在性决定最终 shader 名称
+        string typeSuffix = GetShaderTypeSuffix(materialFile);
         string layaShaderName = baseLayaShaderName + typeSuffix;
+
+        // 模板优先命名：如果带后缀的精确模板不存在，查找对应命名约定的模板
+        if (typeSuffix.Length > 0 && TryLoadPreConvertedTemplate(layaShaderName) == null)
+        {
+            if (typeSuffix == "_D3")
+            {
+                // MeshRenderer：查找 Mesh_ 前缀模板
+                string meshName = "Mesh_" + baseLayaShaderName;
+                if (TryLoadPreConvertedTemplate(meshName) != null)
+                {
+                    layaShaderName = meshName;
+                    ExportLogger.Log($"LayaAir3D: Using Mesh template '{meshName}' for D3 variant");
+                }
+            }
+            else if (typeSuffix == "_Effect")
+            {
+                // ParticleRenderer：查找基础名模板
+                if (TryLoadPreConvertedTemplate(baseLayaShaderName) != null)
+                {
+                    layaShaderName = baseLayaShaderName;
+                    ExportLogger.Log($"LayaAir3D: Using base template '{baseLayaShaderName}' for Effect variant");
+                }
+            }
+        }
 
         ExportLogger.Log($"LayaAir3D: Exporting custom shader material: {material.name} (Shader: {shaderName} -> {layaShaderName})");
 
-        // 导出Shader文件（如果还没导出过）— 缓存 key 含类型后缀
-        string cacheKey = shaderName + typeSuffix;
+        // 导出Shader文件（如果还没导出过）
+        string cacheKey = shaderName + "|" + layaShaderName;
         if (!exportedShaders.Contains(cacheKey))
         {
             ExportShaderFile(shader, layaShaderName, resoureMap, materialFile, baseLayaShaderName);
@@ -1453,6 +1468,15 @@ internal class CustomShaderExporter
         public string zWrite = null;          // "On" / "Off"
         public string zTest = null;           // "LEqual" 等
         public string cullMode = null;        // "Back" / "Front" / "Off"
+
+        // Stencil 状态
+        public string stencilRef = null;        // Ref 值或属性引用
+        public string stencilComp = null;       // CompareFunction
+        public string stencilPass = null;       // StencilOperation (Pass)
+        public string stencilFail = null;       // StencilOperation (Fail)
+        public string stencilZFail = null;      // StencilOperation (ZFail)
+        public string stencilReadMask = null;   // ReadMask
+        public string stencilWriteMask = null;  // WriteMask
     }
 
     /// <summary>
@@ -1477,15 +1501,15 @@ internal class CustomShaderExporter
         {
             case 0: return "Zero";
             case 1: return "One";
-            case 2: return "DstColor";
-            case 3: return "SrcColor";
-            case 4: return "OneMinusDstColor";
-            case 5: return "SrcAlpha";
-            case 6: return "OneMinusSrcAlpha";
-            case 7: return "DstAlpha";
-            case 8: return "OneMinusDstAlpha";
-            case 9: return "SrcAlphaSaturate";
-            case 10: return "OneMinusSrcColor";
+            case 2: return "DestinationColor";
+            case 3: return "SourceColor";
+            case 4: return "OneMinusDestinationColor";
+            case 5: return "SourceAlpha";
+            case 6: return "OneMinusSourceAlpha";
+            case 7: return "DestinationAlpha";
+            case 8: return "OneMinusDestinationAlpha";
+            case 9: return "SourceAlphaSaturate";
+            case 10: return "OneMinusSourceColor";
             default: return null;
         }
     }
@@ -1499,15 +1523,15 @@ internal class CustomShaderExporter
         {
             case "Zero": return "Zero";
             case "One": return "One";
-            case "DstColor": return "DstColor";
-            case "SrcColor": return "SrcColor";
-            case "OneMinusDstColor": return "OneMinusDstColor";
-            case "SrcAlpha": return "SrcAlpha";
-            case "OneMinusSrcAlpha": return "OneMinusSrcAlpha";
-            case "DstAlpha": return "DstAlpha";
-            case "OneMinusDstAlpha": return "OneMinusDstAlpha";
-            case "SrcAlphaSaturate": return "SrcAlphaSaturate";
-            case "OneMinusSrcColor": return "OneMinusSrcColor";
+            case "DstColor": return "DestinationColor";
+            case "SrcColor": return "SourceColor";
+            case "OneMinusDstColor": return "OneMinusDestinationColor";
+            case "SrcAlpha": return "SourceAlpha";
+            case "OneMinusSrcAlpha": return "OneMinusSourceAlpha";
+            case "DstAlpha": return "DestinationAlpha";
+            case "OneMinusDstAlpha": return "OneMinusDestinationAlpha";
+            case "SrcAlphaSaturate": return "SourceAlphaSaturate";
+            case "OneMinusSrcColor": return "OneMinusSourceColor";
             default: return name; // 未知名称直接返回
         }
     }
@@ -1521,7 +1545,7 @@ internal class CustomShaderExporter
         {
             case 0: return "Add";
             case 1: return "Subtract";
-            case 2: return "ReverseSubtract";
+            case 2: return "Reverse_substract";
             case 3: return "Min";
             case 4: return "Max";
             default: return null;
@@ -1537,7 +1561,7 @@ internal class CustomShaderExporter
         {
             case "Add": return "Add";
             case "Sub": return "Subtract";
-            case "RevSub": return "ReverseSubtract";
+            case "RevSub": return "Reverse_substract";
             case "Min": return "Min";
             case "Max": return "Max";
             default: return name;
@@ -1613,6 +1637,44 @@ internal class CustomShaderExporter
     }
 
     /// <summary>
+    /// Unity StencilOp 数值 → LayaAir 字符串
+    /// </summary>
+    private static string UnityStencilOpToLayaString(int value)
+    {
+        switch (value)
+        {
+            case 0: return "Keep";
+            case 1: return "Zero";
+            case 2: return "Replace";
+            case 3: return "IncrementSaturate";
+            case 4: return "DecrementSaturate";
+            case 5: return "Invert";
+            case 6: return "IncrementWrap";
+            case 7: return "DecrementWrap";
+            default: return null;
+        }
+    }
+
+    /// <summary>
+    /// Unity StencilOp 名称 → LayaAir 字符串
+    /// </summary>
+    private static string UnityStencilOpNameToLayaString(string name)
+    {
+        switch (name)
+        {
+            case "Keep": return "Keep";
+            case "Zero": return "Zero";
+            case "Replace": return "Replace";
+            case "IncrSat": return "IncrementSaturate";
+            case "DecrSat": return "DecrementSaturate";
+            case "Invert": return "Invert";
+            case "IncrWrap": return "IncrementWrap";
+            case "DecrWrap": return "DecrementWrap";
+            default: return name;
+        }
+    }
+
+    /// <summary>
     /// 解析渲染状态值，处理属性引用（如 [_SrcBlend]）和字面值
     /// </summary>
     /// <param name="token">渲染状态token，可能是 "[_PropertyName]" 或字面值如 "SrcAlpha"</param>
@@ -1647,6 +1709,36 @@ internal class CustomShaderExporter
 
         // 字面值
         return nameConverter(token);
+    }
+
+    /// <summary>
+    /// 解析渲染状态的整数值（如 Stencil Ref、ReadMask、WriteMask），处理属性引用和字面值
+    /// </summary>
+    private static string ResolveRenderStateIntValue(string token, List<ShaderProperty> properties)
+    {
+        if (string.IsNullOrEmpty(token)) return null;
+
+        // 属性引用：[_PropertyName]
+        if (token.StartsWith("[") && token.EndsWith("]"))
+        {
+            string propName = token.Substring(1, token.Length - 2);
+            if (properties != null)
+            {
+                foreach (var prop in properties)
+                {
+                    if (prop.unityName == propName)
+                    {
+                        int intVal = prop.defaultInt != 0 ? prop.defaultInt : (int)prop.defaultFloat;
+                        return intVal.ToString();
+                    }
+                }
+            }
+            ExportLogger.Warning($"LayaAir3D: RenderState property reference '{propName}' not found in shader properties");
+            return null;
+        }
+
+        // 字面值（直接返回数字字符串）
+        return token;
     }
 
     /// <summary>
@@ -1827,6 +1919,34 @@ internal class CustomShaderExporter
         {
             result.cullMode = cullMatch.Groups[1].Value.Trim();
         }
+
+        // 解析 Stencil 块
+        var stencilBlockMatch = Regex.Match(cleaned, @"\bStencil\s*\{([^}]*)\}", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        if (stencilBlockMatch.Success)
+        {
+            string stencilBlock = stencilBlockMatch.Groups[1].Value;
+
+            var refMatch = Regex.Match(stencilBlock, @"\bRef\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+            if (refMatch.Success) result.stencilRef = refMatch.Groups[1].Value.Trim();
+
+            var compMatch = Regex.Match(stencilBlock, @"\bComp\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+            if (compMatch.Success) result.stencilComp = compMatch.Groups[1].Value.Trim();
+
+            var passMatch = Regex.Match(stencilBlock, @"\bPass\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+            if (passMatch.Success) result.stencilPass = passMatch.Groups[1].Value.Trim();
+
+            var failMatch = Regex.Match(stencilBlock, @"\bFail\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+            if (failMatch.Success) result.stencilFail = failMatch.Groups[1].Value.Trim();
+
+            var zFailMatch = Regex.Match(stencilBlock, @"\bZFail\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+            if (zFailMatch.Success) result.stencilZFail = zFailMatch.Groups[1].Value.Trim();
+
+            var readMaskMatch = Regex.Match(stencilBlock, @"\bReadMask\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+            if (readMaskMatch.Success) result.stencilReadMask = readMaskMatch.Groups[1].Value.Trim();
+
+            var writeMaskMatch = Regex.Match(stencilBlock, @"\bWriteMask\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+            if (writeMaskMatch.Success) result.stencilWriteMask = writeMaskMatch.Groups[1].Value.Trim();
+        }
     }
 
     /// <summary>
@@ -1838,7 +1958,10 @@ internal class CustomShaderExporter
                parseResult.blendOp != null ||
                parseResult.zWrite != null ||
                parseResult.zTest != null ||
-               parseResult.cullMode != null;
+               parseResult.cullMode != null ||
+               parseResult.stencilRef != null ||
+               parseResult.stencilComp != null ||
+               parseResult.stencilPass != null;
     }
 
     /// <summary>
@@ -1959,6 +2082,70 @@ internal class CustomShaderExporter
             if (cull != null && cull != "Back") // Back is default
             {
                 entries.Add($"                cull: \"{cull}\"");
+            }
+        }
+
+        // Stencil（仅在有非默认值时输出）
+        if (parseResult.stencilRef != null || parseResult.stencilComp != null || parseResult.stencilPass != null)
+        {
+            // stencilRef
+            if (parseResult.stencilRef != null)
+            {
+                string refVal = ResolveRenderStateIntValue(parseResult.stencilRef, props);
+                if (refVal != null && refVal != "0") // 默认 Ref=0
+                    entries.Add($"                stencilRef: {refVal}");
+            }
+
+            // stencilTest (CompareFunction) — 复用 ZTest 转换
+            if (parseResult.stencilComp != null)
+            {
+                string comp = ResolveRenderStateValue(parseResult.stencilComp, props,
+                    UnityZTestToLayaString, UnityZTestNameToLayaString);
+                if (comp != null && comp != "Always") // 默认 Comp=Always
+                    entries.Add($"                stencilTest: \"{comp}\"");
+            }
+
+            // stencilPass (StencilOperation)
+            if (parseResult.stencilPass != null)
+            {
+                string passOp = ResolveRenderStateValue(parseResult.stencilPass, props,
+                    UnityStencilOpToLayaString, UnityStencilOpNameToLayaString);
+                if (passOp != null && passOp != "Keep") // 默认 Pass=Keep
+                    entries.Add($"                stencilPass: \"{passOp}\"");
+            }
+
+            // stencilFail (StencilOperation)
+            if (parseResult.stencilFail != null)
+            {
+                string failOp = ResolveRenderStateValue(parseResult.stencilFail, props,
+                    UnityStencilOpToLayaString, UnityStencilOpNameToLayaString);
+                if (failOp != null && failOp != "Keep") // 默认 Fail=Keep
+                    entries.Add($"                stencilFail: \"{failOp}\"");
+            }
+
+            // stencilZFail (StencilOperation)
+            if (parseResult.stencilZFail != null)
+            {
+                string zFailOp = ResolveRenderStateValue(parseResult.stencilZFail, props,
+                    UnityStencilOpToLayaString, UnityStencilOpNameToLayaString);
+                if (zFailOp != null && zFailOp != "Keep") // 默认 ZFail=Keep
+                    entries.Add($"                stencilZFail: \"{zFailOp}\"");
+            }
+
+            // stencilReadMask
+            if (parseResult.stencilReadMask != null)
+            {
+                string readMask = ResolveRenderStateIntValue(parseResult.stencilReadMask, props);
+                if (readMask != null && readMask != "255") // 默认 ReadMask=255
+                    entries.Add($"                stencilReadMask: {readMask}");
+            }
+
+            // stencilWriteMask
+            if (parseResult.stencilWriteMask != null)
+            {
+                string writeMask = ResolveRenderStateIntValue(parseResult.stencilWriteMask, props);
+                if (writeMask != null && writeMask != "255") // 默认 WriteMask=255
+                    entries.Add($"                stencilWriteMask: {writeMask}");
             }
         }
 
@@ -11930,6 +12117,21 @@ internal class CustomShaderExporter
 
         // ★ 检测是否是 2D shader
         bool is2DMaterial = materialFile != null && materialFile.IsUsedBy2DComponent();
+
+        // Stencil 渲染状态（2D shader 跳过，由引擎内部处理）
+        if (!is2DMaterial)
+        {
+            if (material.HasProperty("_Stencil"))
+                props.AddField("s_StencilRef", material.GetInt("_Stencil"));
+            if (material.HasProperty("_StencilComp"))
+                props.AddField("s_StencilTest", material.GetInt("_StencilComp"));
+            if (material.HasProperty("_StencilOp"))
+                props.AddField("s_StencilPass", material.GetInt("_StencilOp"));
+            if (material.HasProperty("_StencilReadMask"))
+                props.AddField("s_StencilReadMask", material.GetInt("_StencilReadMask"));
+            if (material.HasProperty("_StencilWriteMask"))
+                props.AddField("s_StencilWriteMask", material.GetInt("_StencilWriteMask"));
+        }
 
         // 收集Shader属性用于特性检测
         List<ShaderProperty> shaderProperties = CollectShaderProperties(shader);
