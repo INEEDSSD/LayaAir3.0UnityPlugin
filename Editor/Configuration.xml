@@ -11,12 +11,12 @@
   <CustomizeDirectory>False</CustomizeDirectory>
   <CustomizeDirectoryName>
   </CustomizeDirectoryName>
-  <SavePath>D:/project/Laya/LayaProject/TuYou/assets/resources/TuYouScene/</SavePath>
+  <SavePath>/</SavePath>
   <EnableCustomShaderExport>True</EnableCustomShaderExport>
   <AutoSimplifyParticleMesh>False</AutoSimplifyParticleMesh>
   <ParticleMeshMaxVertices>70000</ParticleMeshMaxVertices>
   <ParticleMeshSimplifyQuality>0.7</ParticleMeshSimplifyQuality>
   <ShowParticleMeshWarning>True</ShowParticleMeshWarning>
-  <ParticleExportMode>1</ParticleExportMode>
+  <ParticleExportMode>0</ParticleExportMode>
   <EnableDebugLog>False</EnableDebugLog>
 </LayaExportSetting>
