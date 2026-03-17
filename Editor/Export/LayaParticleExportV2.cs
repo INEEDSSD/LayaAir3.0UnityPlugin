@@ -257,8 +257,9 @@ namespace LayaExport
             ExportStartColor(main, particleSystem);
 
             // gravityModifier
-            if (main.gravityModifier.constant != 0)
-                particleSystem.AddField("gravityModifier", main.gravityModifier.constant);
+            float gravityModifier = EvaluateMinMaxCurveConstant(main.gravityModifier);
+            if (gravityModifier != 0)
+                particleSystem.AddField("gravityModifier", gravityModifier);
 
             // simulationSpace: 0=world, 1=local
             int simSpace = main.simulationSpace == ParticleSystemSimulationSpace.World ? 0 : 1;
@@ -338,7 +339,7 @@ namespace LayaExport
                 UnsupportedFeatureCollector.AddWarning(
                     "ParticleSystem GravityModifier（重力修改器非常量类型）",
                     go,
-                    $"当前模式: {main.gravityModifier.mode}，LayaAir 仅支持 Constant 类型，将以常量值 {main.gravityModifier.constant:F3} 导出"
+                    $"当前模式: {main.gravityModifier.mode}，LayaAir 仅支持 Constant 类型，将以常量值 {EvaluateMinMaxCurveConstant(main.gravityModifier):F3} 导出"
                 );
             }
 
@@ -361,7 +362,7 @@ namespace LayaExport
                 UnsupportedFeatureCollector.AddWarning(
                     "ParticleSystem Emission RateOverTime（发射率非常量类型）",
                     go,
-                    $"当前模式: {ps.emission.rateOverTime.mode}，LayaAir 仅支持 Constant 模式，将以常量值 {ps.emission.rateOverTime.constant:F1} 导出（曲线数据丢失）"
+                    $"当前模式: {ps.emission.rateOverTime.mode}，LayaAir 仅支持 Constant 模式，将以常量值 {EvaluateMinMaxCurveConstant(ps.emission.rateOverTime):F1} 导出（曲线数据丢失）"
                 );
             }
 
@@ -882,10 +883,11 @@ namespace LayaExport
             // 注意: 不导出 enable 字段，标准格式中没有这个字段
 
             // 始终导出emissionRate（Laya默认不一定是10，显式导出以确保正确）
-            emissionObj.AddField("emissionRate", emission.rateOverTime.constant);
+            emissionObj.AddField("emissionRate", EvaluateMinMaxCurveConstant(emission.rateOverTime));
 
-            if (emission.rateOverDistance.constant != 0)
-                emissionObj.AddField("emissionRateOverDistance", emission.rateOverDistance.constant);
+            float rateOverDistance = EvaluateMinMaxCurveConstant(emission.rateOverDistance);
+            if (rateOverDistance != 0)
+                emissionObj.AddField("emissionRateOverDistance", rateOverDistance);
 
             // bursts
             if (emission.burstCount > 0)
@@ -1653,8 +1655,8 @@ namespace LayaExport
         /// 从 MinMaxCurve 获取代表性常量值，支持全部四种模式：
         /// Constant      → curve.constant
         /// TwoConstants  → curve.constantMax
-        /// Curve         → curveMultiplier * curve.curve.Evaluate(0f)
-        /// TwoCurves     → curveMultiplier * curve.curveMax.Evaluate(0f)
+        /// Curve         → curveMultiplier * max(curve.curve)
+        /// TwoCurves     → curveMultiplier * max(curve.curveMax)
         /// 这样可避免 Curve 模式下 .constant 永远返回 0 的问题。
         /// </summary>
         private static float EvaluateMinMaxCurveConstant(ParticleSystem.MinMaxCurve curve, float fallback = 0f)
@@ -1666,12 +1668,28 @@ namespace LayaExport
                 case ParticleSystemCurveMode.TwoConstants:
                     return curve.constantMax;
                 case ParticleSystemCurveMode.Curve:
-                    return curve.curveMultiplier * curve.curve.Evaluate(0f);
+                    return curve.curveMultiplier * EvaluateCurveMax(curve.curve);
                 case ParticleSystemCurveMode.TwoCurves:
-                    return curve.curveMultiplier * curve.curveMax.Evaluate(0f);
+                    return curve.curveMultiplier * EvaluateCurveMax(curve.curveMax);
                 default:
                     return fallback;
             }
+        }
+
+        /// <summary>
+        /// 对 AnimationCurve 采样取最大值。
+        /// </summary>
+        private static float EvaluateCurveMax(AnimationCurve curve, int samples = 32)
+        {
+            if (curve == null || curve.length == 0) return 0f;
+            float max = float.MinValue;
+            for (int i = 0; i <= samples; i++)
+            {
+                float t = (float)i / samples;
+                float v = curve.Evaluate(t);
+                if (v > max) max = v;
+            }
+            return max;
         }
 
         private static JSONObject CreateVector3Object(float x, float y, float z)

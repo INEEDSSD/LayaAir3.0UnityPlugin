@@ -345,6 +345,46 @@ internal class CustomShaderExporter
     // 对应 builtin_unity_to_laya.json → particle_mappings.effect_behaviors.uv_scroll_float.name_patterns
     private static readonly string[] UVScrollFloatNamePatterns = { "Scroll" };
 
+    // ==================== 2D/UI Shader 专用映射 ====================
+    // 2D内置属性列表（不导出到uniformMap，由引擎自动提供）
+    // 对应 builtin_unity_to_laya.json → ui2d_mappings.skip_properties + builtin_sampler
+    private static readonly HashSet<string> UI2DBuiltinProperties = new HashSet<string>
+    {
+        "_MainTex", "_MainTex_ST",
+        "_StencilComp", "_Stencil", "_StencilOp", "_StencilWriteMask", "_StencilReadMask",
+        "_ColorMask", "_UseUIAlphaClip"
+    };
+
+    // 2D属性名映射（覆盖通用的 PropertyNameMappings，2D shader 使用不同的 uniform 命名）
+    // 对应 builtin_unity_to_laya.json → ui2d_mappings.variables
+    private static readonly Dictionary<string, string> UI2DPropertyNameMappings = new Dictionary<string, string>
+    {
+        { "_TintColor", "u_TintColor" },
+        { "_Color", "u_TintColor" },
+        { "_BaseColor", "u_TintColor" },
+    };
+
+    /// <summary>
+    /// 检查是否是2D内置属性（不需要导出到uniformMap）
+    /// </summary>
+    private static bool Is2DBuiltinProperty(string unityName)
+    {
+        return UI2DBuiltinProperties.Contains(unityName);
+    }
+
+    /// <summary>
+    /// 获取2D shader的属性名映射（优先使用2D映射，再fallback到通用映射）
+    /// </summary>
+    private static string Get2DPropertyName(string unityName)
+    {
+        if (UI2DPropertyNameMappings.TryGetValue(unityName, out string layaName))
+            return layaName;
+        if (PropertyNameMappings.TryGetValue(unityName, out string generalName))
+            return generalName;
+        // 默认映射: _PropertyName → u_PropertyName
+        return "u_" + unityName.TrimStart('_');
+    }
+
     // ⭐ 属性名→GLSL宏定义的推断规则（替代 InferDefinesFromProperties 中的硬编码 if/else 链）
     // 可配置：增删此数组条目来控制 shader feature define 的自动推断，无需修改推断逻辑
     // 对应 builtin_unity_to_laya.json → shader_feature_inferences 文档节
@@ -485,6 +525,19 @@ internal class CustomShaderExporter
     }
 
     /// <summary>
+    /// 根据 MaterialFile 的 renderer 使用类型，返回 shader 名称后缀。
+    /// MeshRenderer → _D3, ParticleSystem → _Effect, 2D/无后缀, 未知/无后缀。
+    /// </summary>
+    private static string GetShaderTypeSuffix(MaterialFile materialFile)
+    {
+        if (materialFile == null) return "";
+        if (materialFile.IsUsedBy2DComponent()) return ""; // 2D 已有独立类型处理
+        if (materialFile.IsUsedByParticleSystem()) return "_Effect";
+        if (materialFile.IsUsedByMeshRenderer()) return "_D3";
+        return "";
+    }
+
+    /// <summary>
     /// 自动导出自定义Shader材质
     /// </summary>
     public static void WriteAutoCustomShaderMaterial(Material material, JSONObject jsonData, ResoureMap resoureMap, MaterialFile materialFile = null)
@@ -499,19 +552,33 @@ internal class CustomShaderExporter
         string shaderName = shader.name;
 
         // 生成LayaAir Shader名称（去除路径分隔符，转换为合法名称）
-        string layaShaderName = GenerateLayaShaderName(shaderName);
+        string baseLayaShaderName = GenerateLayaShaderName(shaderName);
+
+        // ★ 如果基础名称存在预转换模板，优先使用模板（不添加类型后缀）
+        string typeSuffix = "";
+        if (TryLoadPreConvertedTemplate(baseLayaShaderName) != null)
+        {
+            ExportLogger.Log($"LayaAir3D: Found pre-converted template for '{baseLayaShaderName}', using template directly (skip type suffix)");
+        }
+        else
+        {
+            // 无模板时，根据 renderer 类型添加后缀，区分 D3/Effect 版本
+            typeSuffix = GetShaderTypeSuffix(materialFile);
+        }
+        string layaShaderName = baseLayaShaderName + typeSuffix;
 
         ExportLogger.Log($"LayaAir3D: Exporting custom shader material: {material.name} (Shader: {shaderName} -> {layaShaderName})");
 
-        // 导出Shader文件（如果还没导出过）
-        if (!exportedShaders.Contains(shaderName))
+        // 导出Shader文件（如果还没导出过）— 缓存 key 含类型后缀
+        string cacheKey = shaderName + typeSuffix;
+        if (!exportedShaders.Contains(cacheKey))
         {
-            ExportShaderFile(shader, layaShaderName, resoureMap, materialFile);
-            exportedShaders.Add(shaderName);
+            ExportShaderFile(shader, layaShaderName, resoureMap, materialFile, baseLayaShaderName);
+            exportedShaders.Add(cacheKey);
         }
 
         // 导出材质文件 (⭐ 传递materialFile以支持粒子Mesh模式检测)
-        ExportMaterialFile(material, shader, layaShaderName, jsonData, resoureMap, materialFile);
+        ExportMaterialFile(material, shader, layaShaderName, jsonData, resoureMap, materialFile, baseLayaShaderName);
     }
 
     /// <summary>
@@ -529,7 +596,9 @@ internal class CustomShaderExporter
     /// <summary>
     /// 导出Shader文件
     /// </summary>
-    private static void ExportShaderFile(Shader shader, string layaShaderName, ResoureMap resoureMap, MaterialFile materialFile = null)
+    private static void ExportShaderFile(Shader shader, string layaShaderName,
+        ResoureMap resoureMap, MaterialFile materialFile = null,
+        string baseLayaShaderName = null)
     {
         // 收集Shader属性
         List<ShaderProperty> properties = CollectShaderProperties(shader);
@@ -538,6 +607,70 @@ internal class CustomShaderExporter
         // 预转换模板用于复杂的自定义shader（如FishStandard_Base），这些shader的HLSL代码
         // 包含BRDFData等Unity SRP专有结构体，无法被通用HLSL→GLSL转换器正确处理
         string preConvertedTemplate = TryLoadPreConvertedTemplate(layaShaderName);
+        // ★ Fallback 查找链（当精确名称的模板不存在时）
+        if (preConvertedTemplate == null && baseLayaShaderName != null && baseLayaShaderName != layaShaderName)
+        {
+            // Fallback 1: D3 变体尝试 "Mesh_" 前缀命名约定
+            // 例如: Artist_Effect_Effect_FullEffect_D3 → Mesh_Artist_Effect_Effect_FullEffect
+            if (layaShaderName.EndsWith("_D3"))
+            {
+                preConvertedTemplate = TryLoadPreConvertedTemplate("Mesh_" + baseLayaShaderName);
+            }
+
+            // Fallback 2: 尝试同类型的原始名模板（仅当模板 shaderType 与目标一致时才安全使用）
+            // 例如: Effect 模板不能用于 D3 变体（attributeMap/VS 结构完全不同）
+            if (preConvertedTemplate == null)
+            {
+                string baseTemplate = TryLoadPreConvertedTemplate(baseLayaShaderName);
+                if (baseTemplate != null)
+                {
+                    // 检查模板的 shaderType 是否与目标类型兼容
+                    string targetShaderType = layaShaderName.EndsWith("_D3") ? "D3" : layaShaderName.EndsWith("_Effect") ? "Effect" : null;
+                    bool isCompatible = true;
+                    if (targetShaderType != null)
+                    {
+                        var typeMatch = Regex.Match(baseTemplate, @"shaderType:\s*(\w+)");
+                        if (typeMatch.Success && typeMatch.Groups[1].Value != targetShaderType)
+                        {
+                            // 类型不兼容（如 Effect 模板用于 D3 变体），跳过模板，交给代码生成
+                            isCompatible = false;
+                            ExportLogger.Log($"LayaAir3D: Skipping incompatible base template for '{layaShaderName}' (template is {typeMatch.Groups[1].Value}, need {targetShaderType})");
+                        }
+                    }
+
+                    if (isCompatible)
+                        preConvertedTemplate = baseTemplate;
+                }
+            }
+
+            // 对找到的 fallback 模板进行名称替换
+            if (preConvertedTemplate != null)
+            {
+                // 从模板的 name: 字段提取实际 shader 名称（可能与 baseLayaShaderName 不同）
+                // 例如 Mesh_Artist_Effect_Effect_FullEffect.shader 内部 name 是 "Mesh_FullEffect"
+                string templateShaderName = baseLayaShaderName;
+                var nameMatch = Regex.Match(preConvertedTemplate, @"name:\s*""?(\w+)""?");
+                if (nameMatch.Success)
+                    templateShaderName = nameMatch.Groups[1].Value;
+
+                preConvertedTemplate = preConvertedTemplate.Replace(templateShaderName + "VS", layaShaderName + "VS");
+                preConvertedTemplate = preConvertedTemplate.Replace(templateShaderName + "FS", layaShaderName + "FS");
+                // 兼容 name:"xxx" 和 name:xxx 两种格式
+                preConvertedTemplate = Regex.Replace(preConvertedTemplate,
+                    @"name:\s*""?" + Regex.Escape(templateShaderName) + @"""?",
+                    "name:" + layaShaderName);
+                preConvertedTemplate = preConvertedTemplate.Replace("SHADER_NAME " + templateShaderName, "SHADER_NAME " + layaShaderName);
+
+                // 确保 shaderType 与目标类型一致
+                string finalTargetType = layaShaderName.EndsWith("_D3") ? "D3" : layaShaderName.EndsWith("_Effect") ? "Effect" : null;
+                if (finalTargetType != null)
+                {
+                    preConvertedTemplate = Regex.Replace(preConvertedTemplate,
+                        @"shaderType:\s*(D3|Effect|Default|None|Sky|PostProcess|D2_BaseRenderNode2D|D2_TextureSV|D2_primitive)",
+                        "shaderType:" + finalTargetType);
+                }
+            }
+        }
 
         // 尝试读取Unity Shader源代码
         string shaderPath = AssetDatabase.GetAssetPath(shader);
@@ -896,9 +1029,15 @@ internal class CustomShaderExporter
         // 这样可以确保粒子shader使用正确的ShaderType (Effect)
         parseResult.isParticleBillboard = IsParticleShader(materialType, unityShaderName, sourceCode, materialFile);
 
-        // 根据isParticleBillboard结果确定ShaderType
+        // 根据组件类型和isParticleBillboard结果确定ShaderType
         LayaShaderType shaderType;
-        if (parseResult.isParticleBillboard)
+        // ★ 2D/UI 组件优先检测（在粒子检测之前）
+        if (materialFile != null && materialFile.IsUsedBy2DComponent())
+        {
+            shaderType = LayaShaderType.D2_BaseRenderNode2D;
+            ExportLogger.Log($"LayaAir3D: 2D component detected, using ShaderType: D2_BaseRenderNode2D");
+        }
+        else if (parseResult.isParticleBillboard)
         {
             // 粒子shader统一使用Effect类型
             shaderType = LayaShaderType.Effect;
@@ -928,12 +1067,12 @@ internal class CustomShaderExporter
         
         // uniformMap
         sb.AppendLine("    uniformMap:{");
-        GenerateUniformMapFromProperties(sb, properties, parseResult);
+        GenerateUniformMapFromProperties(sb, properties, parseResult, shaderType);
         sb.AppendLine("    },");
-        
+
         // defines - 从shader_feature和multi_compile提取
         sb.AppendLine("    defines: {");
-        GenerateDefinesFromParseResult(sb, parseResult);
+        GenerateDefinesFromParseResult(sb, parseResult, shaderType);
         sb.AppendLine("    },");
         
         // attributeMap - 根据shader类型声明不同的顶点属性
@@ -957,6 +1096,15 @@ internal class CustomShaderExporter
             sb.AppendLine("        a_SimulationWorldPostion: Vector3,");
             sb.AppendLine("        a_SimulationWorldRotation: Vector4,");
             sb.AppendLine("        a_SimulationUV: Vector4");
+            sb.AppendLine("    },");
+        }
+        else if (shaderType == LayaShaderType.D2_BaseRenderNode2D || shaderType == LayaShaderType.D2_TextureSV)
+        {
+            // ★ 2D shader的attributeMap（参考 baseRender2D.json 模板）
+            sb.AppendLine("    attributeMap: {");
+            sb.AppendLine("        a_position: Vector4,");
+            sb.AppendLine("        a_color: Vector4,");
+            sb.AppendLine("        a_uv: Vector2");
             sb.AppendLine("    },");
         }
         else
@@ -1022,13 +1170,22 @@ internal class CustomShaderExporter
         
         // ==================== GLSL 代码块 ====================
         sb.AppendLine("GLSL Start");
-        
-        // 生成顶点着色器（会收集所有varying并保存到parseResult）
-        GenerateConvertedVertexShader(sb, layaShaderName, parseResult);
-        
-        // 生成片元着色器（使用VS中保存的varying，确保一致）
-        GenerateConvertedFragmentShader(sb, layaShaderName, parseResult);
-        
+
+        if (shaderType == LayaShaderType.D2_BaseRenderNode2D || shaderType == LayaShaderType.D2_TextureSV)
+        {
+            // ★ 2D shader使用专用的BaseRender2D模板生成VS/FS
+            Generate2DBaseRenderVertexShader(sb, layaShaderName);
+            Generate2DBaseRenderFragmentShader(sb, layaShaderName, parseResult, properties);
+        }
+        else
+        {
+            // 生成顶点着色器（会收集所有varying并保存到parseResult）
+            GenerateConvertedVertexShader(sb, layaShaderName, parseResult);
+
+            // 生成片元着色器（使用VS中保存的varying，确保一致）
+            GenerateConvertedFragmentShader(sb, layaShaderName, parseResult);
+        }
+
         sb.AppendLine("GLSL End");
         
         // 验证和清理生成的代码
@@ -2141,56 +2298,97 @@ internal class CustomShaderExporter
     /// <summary>
     /// 从属性和解析结果生成uniformMap
     /// </summary>
-    private static void GenerateUniformMapFromProperties(StringBuilder sb, List<ShaderProperty> properties, ShaderParseResult parseResult)
+    private static void GenerateUniformMapFromProperties(StringBuilder sb, List<ShaderProperty> properties, ShaderParseResult parseResult, LayaShaderType shaderType = LayaShaderType.D3)
     {
-        sb.AppendLine("        // Basic");
-        sb.AppendLine("        u_AlphaTestValue: { type: Float, default: 0.5, range: [0.0, 1.0] },");
-        sb.AppendLine("        u_TilingOffset: { type: Vector4, default: [1, 1, 0, 0] },");
-        
+        bool is2D = (shaderType == LayaShaderType.D2_BaseRenderNode2D || shaderType == LayaShaderType.D2_TextureSV);
+
+        // 2D shader不需要3D的默认uniform（u_AlphaTestValue, u_TilingOffset等）
+        if (!is2D)
+        {
+            sb.AppendLine("        // Basic");
+            sb.AppendLine("        u_AlphaTestValue: { type: Float, default: 0.5, range: [0.0, 1.0] },");
+            sb.AppendLine("        u_TilingOffset: { type: Vector4, default: [1, 1, 0, 0] },");
+        }
+
         // 已添加的属性（包括引擎内置的，避免重复）
         HashSet<string> addedProps = new HashSet<string>(EngineBuiltInUniforms);
-        addedProps.Add("u_AlphaTestValue");
-        addedProps.Add("u_TilingOffset");
-        
+        if (!is2D)
+        {
+            addedProps.Add("u_AlphaTestValue");
+            addedProps.Add("u_TilingOffset");
+        }
+
         sb.AppendLine();
-        sb.AppendLine("        // Shader Properties");
-        
+        sb.AppendLine(is2D ? "        // 2D Shader Properties" : "        // Shader Properties");
+
         // 收集需要_ST的纹理
         List<string> texturesNeedingST = new List<string>();
-        
+
         foreach (var prop in properties)
         {
-            // 跳过引擎内置变量
-            if (IsEngineBuiltInUniform(prop.layaName))
+            // 2D shader：跳过内置属性（_MainTex → u_baseRender2DTexture由引擎提供、stencil相关等）
+            if (is2D && Is2DBuiltinProperty(prop.unityName))
             {
-                ExportLogger.Log($"LayaAir3D: Skipping engine built-in uniform: {prop.layaName}");
+                ExportLogger.Log($"LayaAir3D: [2D] Skipping built-in 2D property: {prop.unityName}");
                 continue;
             }
-            
-            if (addedProps.Contains(prop.layaName))
+
+            // 2D shader：使用2D专用属性名映射
+            string effectiveLayaName = is2D ? Get2DPropertyName(prop.unityName) : prop.layaName;
+
+            // 跳过引擎内置变量
+            if (IsEngineBuiltInUniform(effectiveLayaName))
+            {
+                ExportLogger.Log($"LayaAir3D: Skipping engine built-in uniform: {effectiveLayaName}");
                 continue;
-            addedProps.Add(prop.layaName);
-            
-            string uniformLine = GenerateUniformLine(prop);
-            sb.AppendLine($"        {uniformLine}");
-            
-            // 如果是纹理，记录需要生成_ST
-            if (prop.type == ShaderUtil.ShaderPropertyType.TexEnv)
+            }
+
+            // 2D shader：跳过3D默认属性（u_AlbedoTexture, u_AlbedoColor等由_MainTex/_Color映射而来）
+            if (is2D && (effectiveLayaName == "u_AlbedoTexture" || effectiveLayaName == "u_AlbedoColor"
+                || effectiveLayaName == "u_AlbedoIntensity"))
+            {
+                ExportLogger.Log($"LayaAir3D: [2D] Skipping 3D default uniform: {effectiveLayaName} (from {prop.unityName})");
+                continue;
+            }
+
+            if (addedProps.Contains(effectiveLayaName))
+                continue;
+            addedProps.Add(effectiveLayaName);
+
+            // 2D shader使用覆盖后的layaName生成uniform行
+            if (is2D && effectiveLayaName != prop.layaName)
+            {
+                // 创建临时属性副本，使用2D映射后的名称
+                var prop2D = prop;
+                string uniformLine = GenerateUniformLineWithName(prop2D, effectiveLayaName);
+                sb.AppendLine($"        {uniformLine}");
+            }
+            else
+            {
+                string uniformLine = GenerateUniformLine(prop);
+                sb.AppendLine($"        {uniformLine}");
+            }
+
+            // 2D shader不需要纹理的_ST（TilingOffset）
+            if (!is2D && prop.type == ShaderUtil.ShaderPropertyType.TexEnv)
             {
                 texturesNeedingST.Add(prop.layaName);
             }
         }
-        
-        // 生成纹理的_ST uniform（用于TRANSFORM_TEX）
-        sb.AppendLine();
-        sb.AppendLine("        // Texture Tiling/Offset");
-        foreach (var texName in texturesNeedingST)
+
+        // 生成纹理的_ST uniform（用于TRANSFORM_TEX）- 2D shader跳过
+        if (!is2D)
         {
-            string stName = texName + "_ST";
-            if (!addedProps.Contains(stName) && !IsEngineBuiltInUniform(stName))
+            sb.AppendLine();
+            sb.AppendLine("        // Texture Tiling/Offset");
+            foreach (var texName in texturesNeedingST)
             {
-                sb.AppendLine($"        {stName}: {{ type: Vector4, default: [1, 1, 0, 0] }},");
-                addedProps.Add(stName);
+                string stName = texName + "_ST";
+                if (!addedProps.Contains(stName) && !IsEngineBuiltInUniform(stName))
+                {
+                    sb.AppendLine($"        {stName}: {{ type: Vector4, default: [1, 1, 0, 0] }},");
+                    addedProps.Add(stName);
+                }
             }
         }
         
@@ -2200,11 +2398,12 @@ internal class CustomShaderExporter
         // （此处intentionally为空，避免生成无关的ST uniform）
 
         // ⭐ 添加Scroll相关uniforms（如果检测到有Scroll属性或者是粒子shader）
+        // 2D shader不需要UV Scroll相关uniforms
         // 如果shader使用Vector4类型的UVScroll（_UVScrollTex/_UVScrollMask），
         // 则已通过properties循环生成了u_UVScrollTex/u_UVScrollMask，不需要float分量形式
         // 使用精确Laya名匹配（数据驱动），配置见 UVScrollVectorLayaNames / UVScrollFloatNamePatterns
         bool hasVectorUVScroll = HasAnyPropertyByLayaName(parseResult, UVScrollVectorLayaNames);
-        if ((parseResult.isParticleBillboard || UVScrollFloatNamePatterns.Any(p => HasPropertyByName(parseResult, p))) && !hasVectorUVScroll)
+        if (!is2D && (parseResult.isParticleBillboard || UVScrollFloatNamePatterns.Any(p => HasPropertyByName(parseResult, p))) && !hasVectorUVScroll)
         {
             // 基础Scroll uniforms (Layer 0) - 仅用于float分量型scroll（非Vector4型）
             if (!addedProps.Contains("u_Scroll0X"))
@@ -2303,12 +2502,19 @@ internal class CustomShaderExporter
     /// <summary>
     /// 从解析结果生成defines
     /// </summary>
-    private static void GenerateDefinesFromParseResult(StringBuilder sb, ShaderParseResult parseResult)
+    private static void GenerateDefinesFromParseResult(StringBuilder sb, ShaderParseResult parseResult, LayaShaderType shaderType = LayaShaderType.D3)
     {
         HashSet<string> addedDefines = new HashSet<string>();
-        
+        bool is2D = (shaderType == LayaShaderType.D2_BaseRenderNode2D || shaderType == LayaShaderType.D2_TextureSV);
+
         // 粒子shader使用TINTCOLOR/ADDTIVEFOG/RENDERMODE_MESH（参考Particle.shader模板），非粒子使用COLOR/ENABLEVERTEXCOLOR
-        if (parseResult.isParticleBillboard)
+        if (is2D)
+        {
+            // ★ 2D shader使用 BASERENDER2D（参考 baseRender2D.json 模板）
+            sb.AppendLine("        BASERENDER2D: { type: bool, default: true },");
+            addedDefines.Add("BASERENDER2D");
+        }
+        else if (parseResult.isParticleBillboard)
         {
             // ⭐ 粒子mesh模式：添加RENDERMODE_MESH define（用于区分mesh和billboard模式）
             sb.AppendLine("        RENDERMODE_MESH: { type: bool, default: false },");
@@ -2329,7 +2535,7 @@ internal class CustomShaderExporter
                 sb.AppendLine("        ENABLEVERTEXCOLOR: { type: bool, default: true },");
                 addedDefines.Add("ENABLEVERTEXCOLOR");
             }
-            
+
             // 如果使用了UV，添加UV宏
             if (parseResult.usesUV)
             {
@@ -9151,32 +9357,41 @@ internal class CustomShaderExporter
         LayaShaderType shaderType;
         if (materialFile != null)
         {
-            bool isParticle = materialFile.IsUsedByParticleSystem();
-            bool isMesh = materialFile.IsUsedByMeshRenderer();
-
-            if (isParticle && !isMesh)
+            // ★ 2D/UI 组件（SpriteRenderer 或 Image）优先检测
+            if (materialFile.IsUsedBy2DComponent())
             {
-                shaderType = LayaShaderType.Effect;
-                ExportLogger.Log($"LayaAir3D: Using Effect shader type (used by ParticleSystemRenderer): {shaderName}");
-            }
-            else if (isMesh && !isParticle)
-            {
-                shaderType = LayaShaderType.D3;
-                ExportLogger.Log($"LayaAir3D: Using D3 shader type (used by MeshRenderer): {shaderName}");
+                shaderType = LayaShaderType.D2_BaseRenderNode2D;
+                ExportLogger.Log($"LayaAir3D: Using D2_BaseRenderNode2D shader type (used by 2D component): {shaderName}");
             }
             else
             {
-                // Fallback to material type detection
-                shaderType = GetShaderTypeFromMaterialType(materialType);
+                bool isParticle = materialFile.IsUsedByParticleSystem();
+                bool isMesh = materialFile.IsUsedByMeshRenderer();
+
+                if (isParticle && !isMesh)
+                {
+                    shaderType = LayaShaderType.Effect;
+                    ExportLogger.Log($"LayaAir3D: Using Effect shader type (used by ParticleSystemRenderer): {shaderName}");
+                }
+                else if (isMesh && !isParticle)
+                {
+                    shaderType = LayaShaderType.D3;
+                    ExportLogger.Log($"LayaAir3D: Using D3 shader type (used by MeshRenderer): {shaderName}");
+                }
+                else
+                {
+                    // Fallback to material type detection
+                    shaderType = GetShaderTypeFromMaterialType(materialType);
+                }
             }
         }
         else
         {
             shaderType = GetShaderTypeFromMaterialType(materialType);
         }
-        
-        // 对于Custom类型，进一步检测ShaderType
-        if (materialType == LayaMaterialType.Custom)
+
+        // 对于Custom类型，且非2D组件使用时，进一步检测ShaderType
+        if (materialType == LayaMaterialType.Custom && shaderType != LayaShaderType.D2_BaseRenderNode2D)
         {
             shaderType = DetectCustomShaderType(shaderNameForDetection, properties);
         }
@@ -9231,36 +9446,65 @@ internal class CustomShaderExporter
         sb.AppendLine("    supportReflectionProbe:false,");
         sb.AppendLine($"    shaderType:{shaderTypeStr},");
         
+        bool is2D = (shaderType == LayaShaderType.D2_BaseRenderNode2D || shaderType == LayaShaderType.D2_TextureSV);
+
         // uniformMap - 导出所有属性
         sb.AppendLine("    uniformMap:{");
-        sb.AppendLine("        // Basic");
-        sb.AppendLine("        u_AlphaTestValue: { type: Float, default: 0.5, range: [0.0, 1.0] },");
-        sb.AppendLine("        u_TilingOffset: { type: Vector4, default: [1, 1, 0, 0] },");
-        // ⭐ 修复：移除u_Time定义（u_Time是引擎内置uniform，不需要在shader中定义）
-        // sb.AppendLine("        u_Time: { type: Vector4, default: [0, 0, 0, 0] },");
-        sb.AppendLine("        u_AlbedoColor: { type: Color, default: [1, 1, 1, 1] },");
-        sb.AppendLine("        u_AlbedoIntensity: { type: Float, default: 1.0, range: [0.0, 4.0] },");
-
-        HashSet<string> addedProps = new HashSet<string> { "u_AlphaTestValue", "u_TilingOffset", "u_AlbedoColor", "u_AlbedoIntensity" };
-        
-        // 添加所有属性
-        sb.AppendLine();
-        sb.AppendLine("        // Shader Properties");
-        foreach (var prop in properties)
+        if (is2D)
         {
-            if (addedProps.Contains(prop.layaName))
-                continue;
-            addedProps.Add(prop.layaName);
-            
-            string uniformLine = GenerateUniformLine(prop);
-            sb.AppendLine($"        {uniformLine}");
+            // ★ 2D shader：只输出非内置的自定义属性
+            HashSet<string> addedProps2D = new HashSet<string>();
+            sb.AppendLine();
+            sb.AppendLine("        // 2D Shader Properties");
+            foreach (var prop in properties)
+            {
+                if (Is2DBuiltinProperty(prop.unityName)) continue;
+                string layaName = Get2DPropertyName(prop.unityName);
+                if (layaName == "u_AlbedoTexture" || layaName == "u_AlbedoColor" || layaName == "u_AlbedoIntensity")
+                    continue;
+                if (addedProps2D.Contains(layaName)) continue;
+                addedProps2D.Add(layaName);
+
+                string uniformLine = GenerateUniformLineWithName(prop, layaName);
+                sb.AppendLine($"        {uniformLine}");
+            }
         }
-        
+        else
+        {
+            sb.AppendLine("        // Basic");
+            sb.AppendLine("        u_AlphaTestValue: { type: Float, default: 0.5, range: [0.0, 1.0] },");
+            sb.AppendLine("        u_TilingOffset: { type: Vector4, default: [1, 1, 0, 0] },");
+            // ⭐ 修复：移除u_Time定义（u_Time是引擎内置uniform，不需要在shader中定义）
+            // sb.AppendLine("        u_Time: { type: Vector4, default: [0, 0, 0, 0] },");
+            sb.AppendLine("        u_AlbedoColor: { type: Color, default: [1, 1, 1, 1] },");
+            sb.AppendLine("        u_AlbedoIntensity: { type: Float, default: 1.0, range: [0.0, 4.0] },");
+
+            HashSet<string> addedProps = new HashSet<string> { "u_AlphaTestValue", "u_TilingOffset", "u_AlbedoColor", "u_AlbedoIntensity" };
+
+            // 添加所有属性
+            sb.AppendLine();
+            sb.AppendLine("        // Shader Properties");
+            foreach (var prop in properties)
+            {
+                if (addedProps.Contains(prop.layaName))
+                    continue;
+                addedProps.Add(prop.layaName);
+
+                string uniformLine = GenerateUniformLine(prop);
+                sb.AppendLine($"        {uniformLine}");
+            }
+        }
+
         sb.AppendLine("    },");
-        
+
         // defines - 根据shader类型设置不同的defines
         sb.AppendLine("    defines: {");
-        if (shaderType == LayaShaderType.Effect)
+        if (is2D)
+        {
+            // ★ 2D shader的defines（参考 baseRender2D.json 模板）
+            sb.AppendLine("        BASERENDER2D: { type: bool, default: true }");
+        }
+        else if (shaderType == LayaShaderType.Effect)
         {
             // 粒子shader的defines（参考Particle.shader模板）
             sb.AppendLine("        TINTCOLOR: { type: bool, default: true },");
@@ -9272,10 +9516,20 @@ internal class CustomShaderExporter
             sb.AppendLine("        ENABLEVERTEXCOLOR: { type: bool, default: true }");
         }
         sb.AppendLine("    },");
-        
-        // attributeMap - 粒子shader需要声明粒子系统的顶点属性
-        if (shaderType == LayaShaderType.Effect)
+
+        // attributeMap - 根据shader类型声明不同的顶点属性
+        if (is2D)
         {
+            // ★ 2D shader的attributeMap（参考 baseRender2D.json 模板）
+            sb.AppendLine("    attributeMap: {");
+            sb.AppendLine("        a_position: Vector4,");
+            sb.AppendLine("        a_color: Vector4,");
+            sb.AppendLine("        a_uv: Vector2");
+            sb.AppendLine("    },");
+        }
+        else if (shaderType == LayaShaderType.Effect)
+        {
+            // 粒子shader的attributeMap
             sb.AppendLine("    attributeMap: {");
             sb.AppendLine("        a_DirectionTime: Vector4,");
             sb.AppendLine("        a_MeshPosition: Vector3,");
@@ -9295,7 +9549,20 @@ internal class CustomShaderExporter
             sb.AppendLine("        a_SimulationUV: Vector4");
             sb.AppendLine("    },");
         }
-        
+        else
+        {
+            // ★ D3 Mesh shader 的 attributeMap（与 ConvertUnityShaderToLaya 中的 D3 分支保持一致）
+            sb.AppendLine("    attributeMap: {");
+            sb.AppendLine("        a_Position: Vector4,");
+            sb.AppendLine("        a_Normal: Vector3,");
+            sb.AppendLine("        a_Color: Vector4,");
+            sb.AppendLine("        a_Texcoord0: Vector2,");
+            sb.AppendLine("        a_Tangent0: Vector4,");
+            sb.AppendLine("        a_BoneIndices: Vector4,");
+            sb.AppendLine("        a_BoneWeights: Vector4");
+            sb.AppendLine("    },");
+        }
+
         // shaderPass
         sb.AppendLine("    shaderPass:[");
         sb.AppendLine("        {");
@@ -9307,12 +9574,18 @@ internal class CustomShaderExporter
         sb.AppendLine("}");
         sb.AppendLine("Shader3D End");
         sb.AppendLine();
-        
+
         // ==================== GLSL 代码块 ====================
         sb.AppendLine("GLSL Start");
-        
+
         // 根据ShaderType生成对应的基础着色器
-        if (shaderType == LayaShaderType.Effect)
+        if (is2D)
+        {
+            // ★ 2D shader：使用 BaseRender2D 专用生成方法
+            Generate2DBaseRenderVertexShader(sb, shaderName);
+            Generate2DBaseRenderFragmentShader(sb, shaderName, null, properties);
+        }
+        else if (shaderType == LayaShaderType.Effect)
         {
             // Effect类型（粒子/特效）使用粒子专用的shader生成函数
             GenerateParticleBillboardVertexShader(sb, shaderName);
@@ -9324,9 +9597,9 @@ internal class CustomShaderExporter
             GenerateEffectVertexShader(sb, shaderName);
             GenerateEffectFragmentShader(sb, shaderName);
         }
-        
+
         sb.AppendLine("GLSL End");
-        
+
         return sb.ToString();
     }
 
@@ -9588,6 +9861,279 @@ internal class CustomShaderExporter
         sb.AppendLine();
         sb.AppendLine("#endGLSL");
         sb.AppendLine();
+    }
+
+    // ==================== 2D BaseRender Shader 生成 ====================
+
+    /// <summary>
+    /// 生成2D BaseRender顶点着色器（标准模板，所有2D自定义shader共用）
+    /// 参考 Laya baseRender2D.json 模板格式
+    /// </summary>
+    private static void Generate2DBaseRenderVertexShader(StringBuilder sb, string shaderName)
+    {
+        sb.AppendLine($"#defineGLSL {shaderName}VS");
+        sb.AppendLine();
+        sb.AppendLine($"    #define SHADER_NAME {shaderName}");
+        sb.AppendLine();
+        sb.AppendLine("    #include \"Sprite2DVertex.glsl\";");
+        sb.AppendLine();
+        sb.AppendLine("    void main() {");
+        sb.AppendLine("        vertexInfo info;");
+        sb.AppendLine("        getVertexInfo(info);");
+        sb.AppendLine();
+        sb.AppendLine("        v_texcoord = info.uv;");
+        sb.AppendLine("        v_color = info.color;");
+        sb.AppendLine();
+        sb.AppendLine("        #ifdef LIGHT2D_ENABLE");
+        sb.AppendLine("            lightAndShadow(info);");
+        sb.AppendLine("        #endif");
+        sb.AppendLine();
+        sb.AppendLine("        gl_Position = getPosition(info.pos);");
+        sb.AppendLine("    }");
+        sb.AppendLine();
+        sb.AppendLine("#endGLSL");
+        sb.AppendLine();
+    }
+
+    /// <summary>
+    /// 生成2D BaseRender片元着色器
+    /// 从Unity fragment代码分析混色逻辑，映射到Laya 2D变量
+    /// </summary>
+    private static void Generate2DBaseRenderFragmentShader(StringBuilder sb, string shaderName,
+        ShaderParseResult parseResult, List<ShaderProperty> properties)
+    {
+        sb.AppendLine($"#defineGLSL {shaderName}FS");
+        sb.AppendLine($"    #define SHADER_NAME {shaderName}");
+        sb.AppendLine("    #if defined(GL_FRAGMENT_PRECISION_HIGH)");
+        sb.AppendLine("    precision highp float;");
+        sb.AppendLine("    #else");
+        sb.AppendLine("    precision mediump float;");
+        sb.AppendLine("    #endif");
+        sb.AppendLine();
+        sb.AppendLine("    #include \"Sprite2DFrag.glsl\";");
+        sb.AppendLine();
+
+        // 声明自定义uniform（非内置的）
+        if (properties != null)
+        {
+            foreach (var prop in properties)
+            {
+                if (Is2DBuiltinProperty(prop.unityName)) continue;
+                string layaName = Get2DPropertyName(prop.unityName);
+                if (layaName == "u_AlbedoTexture" || layaName == "u_AlbedoColor" || layaName == "u_AlbedoIntensity")
+                    continue;
+                // 映射类型
+                string glslType = GetGLSLTypeForProperty(prop);
+                if (glslType != null)
+                {
+                    sb.AppendLine($"    uniform {glslType} {layaName};");
+                }
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("    void main()");
+        sb.AppendLine("    {");
+        sb.AppendLine("        clip();");
+        sb.AppendLine("        vec4 textureColor = texture2D(u_baseRender2DTexture, v_texcoord);");
+
+        // 根据属性生成混色逻辑
+        string colorExpr = AnalyzeFragmentColorExpression(parseResult, properties);
+        sb.AppendLine($"        {colorExpr}");
+
+        sb.AppendLine("    }");
+        sb.AppendLine();
+        sb.AppendLine("#endGLSL");
+    }
+
+    /// <summary>
+    /// 获取属性对应的GLSL类型字符串
+    /// </summary>
+    private static string GetGLSLTypeForProperty(ShaderProperty prop)
+    {
+        switch (prop.type)
+        {
+            case ShaderUtil.ShaderPropertyType.Color:
+            case ShaderUtil.ShaderPropertyType.Vector:
+                return "vec4";
+            case ShaderUtil.ShaderPropertyType.Float:
+            case ShaderUtil.ShaderPropertyType.Range:
+                return "float";
+            case ShaderUtil.ShaderPropertyType.TexEnv:
+                return "sampler2D";
+            case ShaderUtil.ShaderPropertyType.Int:
+                return "int";
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// 分析Unity片元着色器的混色逻辑，映射为Laya 2D表达式
+    ///
+    /// 实现步骤：
+    /// 1. 从parseResult.fragmentCode中提取return表达式
+    /// 2. 将Unity变量名替换为Laya 2D变量名
+    /// 3. 如果解析失败，使用基于属性列表的fallback规则
+    /// </summary>
+    private static string AnalyzeFragmentColorExpression(ShaderParseResult parseResult, List<ShaderProperty> properties)
+    {
+        // 尝试从fragment代码提取return表达式
+        if (parseResult != null && !string.IsNullOrEmpty(parseResult.fragmentCode))
+        {
+            string fragCode = parseResult.fragmentCode;
+
+            // 提取return语句：匹配 "return <expr>;"
+            var returnMatch = System.Text.RegularExpressions.Regex.Match(fragCode, @"return\s+(.+?)\s*;");
+            if (returnMatch.Success)
+            {
+                string expr = returnMatch.Groups[1].Value.Trim();
+
+                // 变量名替换：Unity → Laya 2D
+                // tex2D(_MainTex, ...) → textureColor（已在外部声明采样过）
+                expr = System.Text.RegularExpressions.Regex.Replace(expr,
+                    @"tex2D\s*\(\s*_MainTex\s*,\s*[^)]+\)", "textureColor");
+                expr = System.Text.RegularExpressions.Regex.Replace(expr,
+                    @"texture2D\s*\(\s*_MainTex\s*,\s*[^)]+\)", "textureColor");
+
+                // i.color / IN.color / input.color → v_color
+                expr = System.Text.RegularExpressions.Regex.Replace(expr,
+                    @"(?:i|IN|input|o)\.color", "v_color");
+
+                // i.texcoord → v_texcoord (for any remaining references)
+                expr = System.Text.RegularExpressions.Regex.Replace(expr,
+                    @"(?:i|IN|input|o)\.texcoord\d*", "v_texcoord");
+
+                // Unity属性名 _Xxx → 对应Laya uniform名（优先用2D映射）
+                expr = System.Text.RegularExpressions.Regex.Replace(expr,
+                    @"_([A-Z][a-zA-Z0-9]*)", match =>
+                    {
+                        string unityName = "_" + match.Groups[1].Value;
+                        return Get2DPropertyName(unityName);
+                    });
+
+                // HLSL类型到GLSL类型替换
+                expr = expr.Replace("fixed4", "vec4").Replace("fixed3", "vec3")
+                    .Replace("half4", "vec4").Replace("half3", "vec3")
+                    .Replace("float4", "vec4").Replace("float3", "vec3");
+
+                return $"gl_FragColor = {expr};";
+            }
+
+            // 尝试分析多行逻辑（如 fixed4 col = ...; col.rgb *= ...; return col;）
+            var multiLineResult = AnalyzeMultiLineFragment(fragCode, properties);
+            if (multiLineResult != null)
+            {
+                return multiLineResult;
+            }
+        }
+
+        // Fallback：基于属性列表推断混色逻辑
+        return GenerateFallbackColorExpression(properties);
+    }
+
+    /// <summary>
+    /// 分析多行fragment代码（如：fixed4 col = tex * color; col.rgb *= _Intensity; return col;）
+    /// </summary>
+    private static string AnalyzeMultiLineFragment(string fragCode, List<ShaderProperty> properties)
+    {
+        // 查找赋值语句 + return模式
+        // 匹配模式: type varname = expr; ... return varname;
+        var assignMatch = System.Text.RegularExpressions.Regex.Match(fragCode,
+            @"(?:fixed4|half4|float4|vec4)\s+(\w+)\s*=\s*(.+?)\s*;");
+        if (!assignMatch.Success) return null;
+
+        string varName = assignMatch.Groups[1].Value;
+        string initExpr = assignMatch.Groups[2].Value;
+
+        // 确认有 return varName;
+        var returnCheck = System.Text.RegularExpressions.Regex.Match(fragCode,
+            $@"return\s+{System.Text.RegularExpressions.Regex.Escape(varName)}\s*;");
+        if (!returnCheck.Success) return null;
+
+        StringBuilder result = new StringBuilder();
+
+        // 转换初始化表达式
+        initExpr = ConvertFragExprTo2D(initExpr);
+        result.AppendLine($"vec4 {varName} = {initExpr};");
+
+        // 查找中间的修改语句（如 col.rgb *= ...; col.a *= ...;）
+        string afterInit = fragCode.Substring(assignMatch.Index + assignMatch.Length);
+        string beforeReturn = afterInit.Substring(0, afterInit.IndexOf("return"));
+
+        var modifyMatches = System.Text.RegularExpressions.Regex.Matches(beforeReturn,
+            $@"{System.Text.RegularExpressions.Regex.Escape(varName)}(\.[rgba]+)\s*([\*\+\-]?=)\s*(.+?)\s*;");
+
+        foreach (System.Text.RegularExpressions.Match mod in modifyMatches)
+        {
+            string swizzle = mod.Groups[1].Value;
+            string op = mod.Groups[2].Value;
+            string modExpr = ConvertFragExprTo2D(mod.Groups[3].Value);
+
+            // 跳过alpha clip相关逻辑（Laya 2D由clip()处理）
+            if (swizzle == ".a" && modExpr.Contains("clip"))
+                continue;
+
+            result.AppendLine($"        {varName}{swizzle} {op} {modExpr};");
+        }
+
+        result.Append($"        gl_FragColor = {varName};");
+        return result.ToString();
+    }
+
+    /// <summary>
+    /// 将fragment表达式中的Unity变量名转换为Laya 2D变量名
+    /// </summary>
+    private static string ConvertFragExprTo2D(string expr)
+    {
+        // tex2D(_MainTex, ...) → textureColor
+        expr = System.Text.RegularExpressions.Regex.Replace(expr,
+            @"tex2D\s*\(\s*_MainTex\s*,\s*[^)]+\)", "textureColor");
+        expr = System.Text.RegularExpressions.Regex.Replace(expr,
+            @"texture2D\s*\(\s*_MainTex\s*,\s*[^)]+\)", "textureColor");
+
+        // i.color / IN.color → v_color
+        expr = System.Text.RegularExpressions.Regex.Replace(expr,
+            @"(?:i|IN|input|o)\.color", "v_color");
+
+        // Unity属性名 _Xxx → Laya uniform名
+        expr = System.Text.RegularExpressions.Regex.Replace(expr,
+            @"_([A-Z][a-zA-Z0-9]*)", match =>
+            {
+                string unityName = "_" + match.Groups[1].Value;
+                return Get2DPropertyName(unityName);
+            });
+
+        // HLSL类型到GLSL类型
+        expr = expr.Replace("fixed4", "vec4").Replace("fixed3", "vec3")
+            .Replace("half4", "vec4").Replace("half3", "vec3")
+            .Replace("float4", "vec4").Replace("float3", "vec3");
+
+        return expr;
+    }
+
+    /// <summary>
+    /// 当无法解析fragment代码时，基于属性列表生成fallback混色表达式
+    /// </summary>
+    private static string GenerateFallbackColorExpression(List<ShaderProperty> properties)
+    {
+        if (properties != null)
+        {
+            bool hasTintColor = properties.Any(p => p.unityName == "_TintColor");
+            bool hasColor = properties.Any(p => p.unityName == "_Color" || p.unityName == "_BaseColor");
+
+            if (hasTintColor || hasColor)
+            {
+                // 有TintColor或Color → v_color * u_TintColor * textureColor
+                return "gl_FragColor = v_color * u_TintColor * textureColor;";
+            }
+        }
+
+        // 标准 baseRender2D 路径
+        StringBuilder sb = new StringBuilder();
+        sb.AppendLine("textureColor = transspaceColor(textureColor);");
+        sb.Append("        setglColor(textureColor);");
+        return sb.ToString();
     }
 
     /// <summary>
@@ -11300,26 +11846,53 @@ internal class CustomShaderExporter
     }
 
     /// <summary>
+    /// 使用指定的Laya名称生成uniform行（用于2D shader等需要覆盖名称的场景）
+    /// </summary>
+    private static string GenerateUniformLineWithName(ShaderProperty prop, string overrideName)
+    {
+        string originalName = prop.layaName;
+        prop.layaName = overrideName;
+        string result = GenerateUniformLine(prop);
+        prop.layaName = originalName;
+        return result;
+    }
+
+    /// <summary>
     /// 导出材质文件
     /// </summary>
     private static void ExportMaterialFile(Material material, Shader shader, string layaShaderName,
-        JSONObject jsonData, ResoureMap resoureMap, MaterialFile materialFile = null)
+        JSONObject jsonData, ResoureMap resoureMap, MaterialFile materialFile = null,
+        string baseLayaShaderName = null)
     {
         // ⭐ 设置模板shader导出上下文（用于属性名过滤、大小写修正、RadioGroup defines推导）
         _currentTemplateVarNames = null;
         _currentTemplatePropertyOverrides = null;
         _currentTemplateRadioGroups = null;
         string templateContent = TryLoadPreConvertedTemplate(layaShaderName);
+        // ★ Fallback 查找链（与 ExportShaderFile 保持一致）
+        if (templateContent == null && baseLayaShaderName != null && baseLayaShaderName != layaShaderName)
+        {
+            // Fallback 1: D3 变体尝试 "Mesh_" 前缀命名约定
+            if (layaShaderName.EndsWith("_D3"))
+                templateContent = TryLoadPreConvertedTemplate("Mesh_" + baseLayaShaderName);
+            // Fallback 2: 同类型原始名模板
+            if (templateContent == null)
+                templateContent = TryLoadPreConvertedTemplate(baseLayaShaderName);
+        }
         if (templateContent != null)
         {
             _currentTemplateVarNames = ParseTemplateUniformMapNames(templateContent);
             _currentTemplateRadioGroups = ParseTemplateRadioGroups(templateContent);
             if (TemplatePropertyOverrides.TryGetValue(layaShaderName, out var overrides))
                 _currentTemplatePropertyOverrides = overrides;
+            else if (baseLayaShaderName != null && TemplatePropertyOverrides.TryGetValue(baseLayaShaderName, out overrides))
+                _currentTemplatePropertyOverrides = overrides;
         }
 
         // 硬编码的 RadioGroup 映射优先级高于模板解析结果（更稳定可靠）
         if (RadioGroupDefineMappings.TryGetValue(layaShaderName, out var hardcodedGroups))
+            _currentTemplateRadioGroups = hardcodedGroups;
+        else if (baseLayaShaderName != null && RadioGroupDefineMappings.TryGetValue(baseLayaShaderName, out hardcodedGroups))
             _currentTemplateRadioGroups = hardcodedGroups;
 
         jsonData.AddField("version", "LAYAMATERIAL:04");
@@ -11355,6 +11928,9 @@ internal class CustomShaderExporter
         // Unity shaderKeywords（shader_feature）不导出：LayaAir 不支持 shader variant 机制，
         // 相关功能开关通过 RadioGroup Int 属性推导出对应的 defines（见下方 Int case 处理）
 
+        // ★ 检测是否是 2D shader
+        bool is2DMaterial = materialFile != null && materialFile.IsUsedBy2DComponent();
+
         // 收集Shader属性用于特性检测
         List<ShaderProperty> shaderProperties = CollectShaderProperties(shader);
 
@@ -11378,7 +11954,22 @@ internal class CustomShaderExporter
             if (IsInternalProperty(propName))
                 continue;
 
-            string layaName = ConvertToLayaPropertyName(propName);
+            // ★ 2D shader 使用专用属性名映射
+            string layaName;
+            if (is2DMaterial)
+            {
+                // 跳过 2D 内置属性
+                if (Is2DBuiltinProperty(propName))
+                    continue;
+                layaName = Get2DPropertyName(propName);
+                // 跳过 3D 默认属性（由通用映射产生的不适用于 2D 的名称）
+                if (layaName == "u_AlbedoTexture" || layaName == "u_AlbedoColor" || layaName == "u_AlbedoIntensity")
+                    continue;
+            }
+            else
+            {
+                layaName = ConvertToLayaPropertyName(propName);
+            }
 
             // ⭐ 有模板上下文时，layaName 为 null 表示模板中不含此属性，跳过
             if (layaName == null)
@@ -11393,7 +11984,9 @@ internal class CustomShaderExporter
                     // 规则：Unity的 _MainTex/_BaseMap/_AlbedoTexture → u_TilingOffset
                     //       其他纹理 _XXX → u_XXX_ST
                     // 格式：[scaleX, scaleY, offsetX, offsetY]
-                    ExportTextureTilingOffset(material, propName, layaName, props);
+                    // ★ 2D shader 不需要 TilingOffset
+                    if (!is2DMaterial)
+                        ExportTextureTilingOffset(material, propName, layaName, props);
                     break;
 
                 case ShaderUtil.ShaderPropertyType.Color:
@@ -11537,6 +12130,13 @@ internal class CustomShaderExporter
             }
         }
         // ⭐ Note: Effect类型（粒子）的宏定义由Keywords映射自动生成，不再手动添加
+
+        // ★ 2D shader 材质添加 BASERENDER2D define
+        if (is2DMaterial)
+        {
+            if (!defines.Contains("BASERENDER2D"))
+                defines.Add("BASERENDER2D");
+        }
 
         // ⭐ FIX 4/4: 粒子Mesh渲染模式修复 - 添加RENDERMODE_MESH define
         // 当粒子系统使用Mesh渲染模式时，shader需要v_MeshColor变量

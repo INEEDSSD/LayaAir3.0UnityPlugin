@@ -6,7 +6,7 @@ using System.IO;
 using UnityEngine.SceneManagement;
 
 
-internal class HierarchyFile 
+internal class HierarchyFile
 {
     private ResoureMap resouremap;
     private NodeMap nodeMap;
@@ -43,12 +43,13 @@ internal class HierarchyFile
         {
             return;
         }
+
         list.Add(gameObject);
         if (gameObject.transform.childCount > 0)
         {
             for (int i = 0; i < gameObject.transform.childCount; i++)
             {
-                AddtoList(gameObject.transform.GetChild(i).gameObject,list);
+                AddtoList(gameObject.transform.GetChild(i).gameObject, list);
             }
         }
     }
@@ -185,19 +186,13 @@ internal class HierarchyFile
 
         GameObject[] gameObjects = scene.GetRootGameObjects();
 
-        if (gameObjects.Length > 0)
+        JSONObject child = new JSONObject(JSONObject.Type.ARRAY);
+        scene3dNode.AddField("_$child", child);
+        for (int i = 0; i < gameObjects.Length; i++)
         {
-            JSONObject child = new JSONObject(JSONObject.Type.ARRAY);
-            scene3dNode.AddField("_$child", child);
-            for (int i = 0; i < gameObjects.Length; i++)
-            {
-                child.Add(this.nodeMap.getJsonObject(gameObjects[i].gameObject));
-            }
+            child.Add(this.nodeMap.getJsonObject(gameObjects[i].gameObject));
         }
-        else
-        {
-            scene3dNode.AddField("_$child", new JSONObject(JSONObject.Type.ARRAY));
-        }
+
         this.resouremap.AddExportFile(new JsonFile(sceneName, node));
     }
 }

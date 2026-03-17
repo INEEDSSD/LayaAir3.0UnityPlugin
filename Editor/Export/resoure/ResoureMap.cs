@@ -3,6 +3,7 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 using UnityEngine.Rendering;
+
 using LayaExport;
 
 internal class ResoureMap
@@ -112,7 +113,7 @@ internal class ResoureMap
         meshInstanceToPath[meshInstanceID] = customPath;
     }
 
-    public MaterialFile GetMaterialFile(Material material, Renderer renderer = null)
+    public MaterialFile GetMaterialFile(Material material, Renderer renderer = null, bool is2DUsage = false)
     {
         if (material == null)
         {
@@ -121,20 +122,68 @@ internal class ResoureMap
         }
 
         string path = AssetsUtil.GetMaterialPath(material);
+
+        // ★ 检测 renderer 类型冲突：同一材质被不同类型 renderer 使用时，创建变体
+        if (renderer != null && this.HaveFileData(path))
+        {
+            MaterialFile existingFile = this.GetFileData(path) as MaterialFile;
+            if (existingFile != null)
+            {
+                bool isParticleRenderer = renderer is ParticleSystemRenderer;
+                bool isMeshRenderer = renderer is MeshRenderer || renderer is SkinnedMeshRenderer;
+
+                // 现有材质是 Mesh 类型，新请求来自粒子 → 创建 _Effect 变体
+                if (isParticleRenderer && !existingFile.IsUsedByParticleSystem())
+                {
+                    string variantPath = GetVariantMaterialPath(path, "_Effect");
+                    if (!this.HaveFileData(variantPath))
+                    {
+                        this.AddExportFile(new MaterialFile(this, material, renderer, variantPath));
+                    }
+                    return this.GetFileData(variantPath) as MaterialFile;
+                }
+
+                // 现有材质是粒子类型，新请求来自 Mesh → 创建 _D3 变体
+                if (isMeshRenderer && !existingFile.IsUsedByMeshRenderer())
+                {
+                    string variantPath = GetVariantMaterialPath(path, "_D3");
+                    if (!this.HaveFileData(variantPath))
+                    {
+                        this.AddExportFile(new MaterialFile(this, material, renderer, variantPath));
+                    }
+                    return this.GetFileData(variantPath) as MaterialFile;
+                }
+            }
+        }
+
+        // 正常路径（首次创建或同类型复用）
         if (!this.HaveFileData(path))
         {
-            this.AddExportFile(new MaterialFile(this, material, renderer));
+            this.AddExportFile(new MaterialFile(this, material, renderer, null, is2DUsage));
         }
         else
         {
             // Update renderer type information if this material is used by a different renderer type
             MaterialFile existingFile = this.GetFileData(path) as MaterialFile;
-            if (existingFile != null && renderer != null)
+            if (existingFile != null)
             {
-                existingFile.AddRendererUsage(renderer);
+                if (renderer != null) existingFile.AddRendererUsage(renderer);
+                if (is2DUsage) existingFile.MarkAs2DUsage();
             }
         }
         return this.GetFileData(path) as MaterialFile;
+    }
+
+    /// <summary>
+    /// 为材质路径生成变体路径（在扩展名前插入后缀）
+    /// 例如: "Materials/MyMat.lmat" + "_Effect" → "Materials/MyMat_Effect.lmat"
+    /// </summary>
+    private static string GetVariantMaterialPath(string originalPath, string suffix)
+    {
+        int dotIndex = originalPath.LastIndexOf('.');
+        if (dotIndex >= 0)
+            return originalPath.Substring(0, dotIndex) + suffix + originalPath.Substring(dotIndex);
+        return originalPath + suffix;
     }
 
     public TextureFile GetTextureFile(Texture texture, bool isNormal, bool isSpriteTexture = false)
@@ -646,6 +695,20 @@ internal class ResoureMap
     /// 将 Unity SpriteRenderer 导出为 Laya UI3D 组件。
     /// UI3D 引用一个内嵌 Image 的 2D 预制体，Image 的 skin 指向导出的 sprite 纹理。
     /// </summary>
+    /// <summary>
+    /// 检查SpriteRenderer/Image是否使用了自定义材质（非Unity默认Sprite材质）
+    /// </summary>
+    private static bool IsCustomSpriteMaterial(Material material)
+    {
+        if (material == null) return false;
+        string shaderName = material.shader.name;
+        // Unity 默认 Sprite shader 不需要导出
+        return shaderName != "Sprites/Default"
+            && shaderName != "UI/Default"
+            && shaderName != "Hidden/InternalErrorShader"
+            && !string.IsNullOrEmpty(shaderName);
+    }
+
     public JSONObject GetSpriteRendererComponentData(SpriteRenderer spriteRenderer, bool isOverride)
     {
         Sprite sprite = spriteRenderer.sprite;
@@ -679,6 +742,15 @@ internal class ResoureMap
             return null;
         }
 
+        // ★ 检测并导出自定义材质（非默认Sprite shader）
+        Material sharedMaterial = spriteRenderer.sharedMaterial;
+        MaterialFile materialFile = null;
+        if (IsCustomSpriteMaterial(sharedMaterial))
+        {
+            materialFile = this.GetMaterialFile(sharedMaterial, spriteRenderer);
+            ExportLogger.Log($"LayaAir3D: SpriteRenderer '{spriteRenderer.gameObject.name}' uses custom shader '{sharedMaterial.shader.name}', exporting material.");
+        }
+
         // Sprite 像素尺寸（在图集中的 rect，使用缓存值）
         int pixelWidth  = Mathf.RoundToInt(spriteRect.width);
         int pixelHeight = Mathf.RoundToInt(spriteRect.height);
@@ -691,7 +763,8 @@ internal class ResoureMap
         if (!this.HaveFileData(spritePrefabKey))
         {
             this.AddExportFile(new UI2DPrefabFile(spritePrefabKey, textureFile,
-                                                  spriteName, pixelWidth, pixelHeight));
+                                                  spriteName, pixelWidth, pixelHeight,
+                                                  materialFile));
         }
         UI2DPrefabFile ui2DPrefab = this.GetFileData(spritePrefabKey) as UI2DPrefabFile;
 

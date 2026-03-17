@@ -495,6 +495,41 @@
       ]
     },
 
+    "ui2d_mappings": {
+      "description": "Unity 2D/UI Shader → LayaAir D2_BaseRenderNode2D 映射规则",
+      "shader_type": "D2_BaseRenderNode2D",
+      "template_base": "baseRender2D",
+      "attributes": {
+        "a_position": "Vector4",
+        "a_color": "Vector4",
+        "a_uv": "Vector2"
+      },
+      "defines": {
+        "BASERENDER2D": { "type": "bool", "default": true }
+      },
+      "builtin_uniforms": [
+        "u_baseRender2DTexture"
+      ],
+      "variables": [
+        { "from": "_MainTex", "to": "u_baseRender2DTexture", "type": "builtin_sampler", "description": "2D引擎内置主纹理，不加入uniformMap" },
+        { "from": "_MainTex_ST", "to": "", "type": "skip", "description": "2D不需要TilingOffset" },
+        { "from": "_TintColor", "to": "u_TintColor", "type": "Vector4", "default": [1,1,1,1], "description": "着色颜色" },
+        { "from": "_Color", "to": "u_TintColor", "type": "Vector4", "default": [1,1,1,1], "description": "主颜色→TintColor" }
+      ],
+      "skip_properties": [
+        "_StencilComp", "_Stencil", "_StencilOp", "_StencilWriteMask", "_StencilReadMask",
+        "_ColorMask", "_UseUIAlphaClip"
+      ],
+      "fragment_variable_mapping": {
+        "description": "FS中的变量名替换规则",
+        "rules": [
+          { "from": "tex2D(_MainTex", "to": "texture2D(u_baseRender2DTexture" },
+          { "from": "i.color", "to": "v_color" },
+          { "from": "i.texcoord", "to": "v_texcoord" }
+        ]
+      }
+    },
+
     "custom_functions": [],
 
     "shader_feature_inferences": {
