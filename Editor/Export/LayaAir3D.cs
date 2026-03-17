@@ -169,6 +169,21 @@ public class LayaAir3D : EditorWindow
                 ExportConfig.CustomizeDirectoryName = GUILayout.TextField(ExportConfig.CustomizeDirectoryName);
             GUILayout.EndHorizontal();
 
+            // 粒子系统导出模式
+            GUILayout.Space(10);
+            GUILayout.Label("粒子导出默认模式 (Particle Export Mode)", EditorStyles.boldLabel);
+            ExportConfig.ParticleExportMode = GUILayout.Toolbar(
+                ExportConfig.ParticleExportMode,
+                new string[] { "Shuriken (GPU)", "CPU Particle" },
+                GUILayout.Height(25)
+            );
+            EditorGUILayout.HelpBox(
+                "全局默认值。单个粒子可挂 LayaParticleExportSetting 组件覆盖。\n" +
+                "Global default. Individual particles can override via LayaParticleExportSetting component.",
+                MessageType.Info
+            );
+            GUILayout.Space(5);
+
             // 调试日志开关
             ExportConfig.EnableDebugLog = GUILayout.Toggle(ExportConfig.EnableDebugLog, "启用调试日志（Enable Debug Logs）");
 

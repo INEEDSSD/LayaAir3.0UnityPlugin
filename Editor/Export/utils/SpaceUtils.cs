@@ -114,4 +114,13 @@ public class SpaceUtils
         eulr[1] *= -1;
         eulr[2] *= -1;
     }
+
+    /// <summary>
+    /// 获取左手系到右手系的方向转换向量 (X取反)
+    /// CPU粒子导出中用于力/速度等方向量的坐标转换
+    /// </summary>
+    public static Vector3 getDirection()
+    {
+        return new Vector3(-1, 1, 1);
+    }
 }
