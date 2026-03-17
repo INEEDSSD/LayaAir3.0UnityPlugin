@@ -18,5 +18,4 @@
   <ParticleMeshSimplifyQuality>0.7</ParticleMeshSimplifyQuality>
   <ShowParticleMeshWarning>True</ShowParticleMeshWarning>
   <ParticleExportMode>0</ParticleExportMode>
-  <EnableDebugLog>False</EnableDebugLog>
 </LayaExportSetting>

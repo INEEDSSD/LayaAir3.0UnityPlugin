@@ -41,9 +41,6 @@ public class ExportConfig
     // 粒子系统默认导出模式: 0=Shuriken(GPU), 1=CPU Particle
     private static int _ParticleExportMode = 0;
 
-    //启用调试日志输出
-    private static bool _EnableDebugLog = false;
-
     //场景 or 预制体
     public static int FirstlevelMenu
     {
@@ -278,20 +275,6 @@ public class ExportConfig
         }
     }
 
-    //是否启用调试日志
-    public static bool EnableDebugLog
-    {
-        get { return _EnableDebugLog; }
-        set
-        {
-            if (_EnableDebugLog != value)
-            {
-                _EnableDebugLog = value;
-                _updateConfig = true;
-            }
-        }
-    }
-
     public static string SavePath()
     {
         if (CustomizeDirectory)
@@ -346,10 +329,6 @@ public class ExportConfig
         if (xn.SelectSingleNode("ParticleExportMode") != null)
             ParticleExportMode = int.Parse(xn.SelectSingleNode("ParticleExportMode").InnerText);
 
-        // 调试日志配置
-        if (xn.SelectSingleNode("EnableDebugLog") != null)
-            EnableDebugLog = bool.Parse(xn.SelectSingleNode("EnableDebugLog").InnerText);
-
         _updateConfig = false;
     }
     public static void saveConfiguration()
@@ -395,10 +374,6 @@ public class ExportConfig
         // 粒子导出模式配置
         if (xn.SelectSingleNode("ParticleExportMode") != null)
             xn.SelectSingleNode("ParticleExportMode").InnerText = ParticleExportMode.ToString();
-
-        // 调试日志配置
-        if (xn.SelectSingleNode("EnableDebugLog") != null)
-            xn.SelectSingleNode("EnableDebugLog").InnerText = EnableDebugLog.ToString();
 
         xmlDoc.Save(configUrl);
     }

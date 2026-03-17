@@ -384,22 +384,21 @@ internal class ResoureMap
                     compents.Add(particleComp);
                 }
             }
-            // CPU 模式: ParticleSystem 阶段不处理, 延迟到 ParticleSystemRenderer 阶段
-        }
-        else if (comp is ParticleSystemRenderer)
-        {
-            int mode = GetParticleExportMode(gameObject);
-            if (mode == 1) // CPU Particle
+            else if (mode == 1) // CPU Particle
             {
-                ParticleSystem ps = gameObject.GetComponent<ParticleSystem>();
-                if (ps != null)
+                ParticleSystem ps = comp as ParticleSystem;
+                ParticleSystemRenderer psr = gameObject.GetComponent<ParticleSystemRenderer>();
+                if (ps != null && psr != null)
                 {
                     JSONObject particleSystemData = ParticleSystemData.GetParticleSystem(ps, isOverride, map, this);
                     compents.Add(particleSystemData);
-                    ParticleSystemData.GetParticleSystemRenderer(comp as ParticleSystemRenderer, isOverride, this, particleSystemData);
+                    ParticleSystemData.GetParticleSystemRenderer(psr, isOverride, this, particleSystemData);
                 }
             }
-            // Shuriken 模式: 已在 ParticleSystem 阶段完成, 此处跳过
+        }
+        else if (comp is ParticleSystemRenderer)
+        {
+            // GPU/CPU 模式均已在 ParticleSystem 阶段完成, 此处跳过
         }
         else if (comp is ParticleSystemForceField)
         {
@@ -1129,13 +1128,45 @@ internal class ResoureMap
 
     /// <summary>
     /// 获取指定 GameObject 的粒子导出模式
-    /// 优先使用 Object 上的 LayaParticleExportSetting 组件, 否则使用全局默认
+    /// 优先查找当前节点, 再向上查找父节点的 LayaParticleExportSetting 组件,
+    /// 都没有则使用全局默认。
+    /// 使用类型名称匹配 + 反射读取，避免 Editor/Runtime 程序集不匹配导致 GetComponent 失败。
     /// </summary>
     private static int GetParticleExportMode(GameObject gameObject)
     {
-        var setting = gameObject.GetComponent<LayaParticleExportSetting>();
-        if (setting != null)
-            return (int)setting.exportMode;
+        int result = FindParticleExportSetting(gameObject);
+        if (result >= 0) return result;
+
+        // 向上查找父节点
+        Transform parent = gameObject.transform.parent;
+        while (parent != null)
+        {
+            result = FindParticleExportSetting(parent.gameObject);
+            if (result >= 0) return result;
+            parent = parent.parent;
+        }
+
         return ExportConfig.ParticleExportMode;
+    }
+
+    /// <summary>
+    /// 通过类型名称查找 LayaParticleExportSetting 并用反射读取 exportMode，
+    /// 避免 Editor 与 Runtime 程序集类型不一致导致 GetComponent&lt;T&gt; 返回 null 的问题。
+    /// 返回 -1 表示未找到。
+    /// </summary>
+    private static int FindParticleExportSetting(GameObject go)
+    {
+        foreach (var comp in go.GetComponents<MonoBehaviour>())
+        {
+            if (comp != null && comp.GetType().Name == "LayaParticleExportSetting")
+            {
+                var field = comp.GetType().GetField("exportMode");
+                if (field != null)
+                {
+                    return (int)field.GetValue(comp);
+                }
+            }
+        }
+        return -1;
     }
 }

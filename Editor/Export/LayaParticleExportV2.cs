@@ -49,8 +49,8 @@ namespace LayaExport
                 return null;
             }
             
-            // ⭐ 检查粒子系统mesh顶点数量限制
-            CheckParticleVertexLimit(ps, psr, gameObject.name, resoureMap);
+            // [DEBUG] 暂时屏蔽GPU粒子mesh顶点数量检测
+            // CheckParticleVertexLimit(ps, psr, gameObject.name, resoureMap);
 
             JSONObject comp = new JSONObject(JSONObject.Type.OBJECT);
             comp.AddField("_$type", "ShurikenParticleRenderer");
@@ -155,29 +155,15 @@ namespace LayaExport
                     comp.AddField("stretchedBillboardLengthScale", psr.lengthScale);
             }
 
-            // Mesh模式下的 RenderAlignment 检查
-            // Unity 中 Mesh + View alignment 相当于 billboard 效果，
-            // 但 LayaAir 中 Mesh 就是 Mesh，没有 RenderAlignment 属性，无法实现此效果
-            if (renderMode == 4 && psr.alignment == ParticleSystemRenderSpace.View)
-            {
-                UnsupportedFeatureCollector.AddWarning(
-                    "ParticleRenderer Mesh+View Alignment（粒子Mesh模式+朝向摄像机）",
-                    psr.gameObject,
-                    "LayaAir 中 Mesh 模式不支持 RenderAlignment=View，粒子不会朝向摄像机，如需此效果请改用 Billboard 模式"
-                );
-            }
-
-            // Billboard模式下的 RenderAlignment=Local 检查
-            // Unity 中 Billboard + Local alignment 粒子会跟随发射器的局部坐标轴旋转，表现类似 Mesh 模式
-            // LayaAir 中 Billboard 始终朝向摄像机，无法还原 Local alignment 的效果
-            if (renderMode == 0 && psr.alignment == ParticleSystemRenderSpace.Local)
-            {
-                UnsupportedFeatureCollector.AddWarning(
-                    "ParticleRenderer Billboard+Local Alignment（粒子Billboard模式+局部对齐）",
-                    psr.gameObject,
-                    "Unity 中 Billboard+RenderAlignment=Local 粒子会跟随发射器局部坐标旋转（类似Mesh表现），LayaAir 中 Billboard 始终朝向摄像机，无法还原此效果。如需类似表现请改用 Mesh 模式"
-                );
-            }
+            // [DEBUG] 暂时屏蔽GPU粒子渲染器对齐方式的兼容性检测
+            // if (renderMode == 4 && psr.alignment == ParticleSystemRenderSpace.View)
+            // {
+            //     UnsupportedFeatureCollector.AddWarning(...);
+            // }
+            // if (renderMode == 0 && psr.alignment == ParticleSystemRenderSpace.Local)
+            // {
+            //     UnsupportedFeatureCollector.AddWarning(...);
+            // }
 
             // Mesh模式
             if (renderMode == 4 && psr.mesh != null)
@@ -322,7 +308,8 @@ namespace LayaExport
             if (ps.textureSheetAnimation.enabled)
                 ExportTextureSheetAnimation(ps.textureSheetAnimation, particleSystem);
 
-            CheckUnsupportedParticleFeatures(ps, main);
+            // [DEBUG] 暂时屏蔽GPU粒子不支持功能的检测，排查CPU粒子问题
+            // CheckUnsupportedParticleFeatures(ps, main);
         }
 
         /// <summary>
