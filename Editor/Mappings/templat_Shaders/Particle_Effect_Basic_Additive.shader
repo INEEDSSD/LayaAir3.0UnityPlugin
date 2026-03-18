@@ -1,7 +1,7 @@
 ﻿Shader3D Start
 {
     type:Shader3D,
-    name:Effect_Basic_Additive,
+    name:Particle_Effect_Basic_Additive,
     enableInstancing:true,
     supportReflectionProbe:false,
     shaderType:Effect,

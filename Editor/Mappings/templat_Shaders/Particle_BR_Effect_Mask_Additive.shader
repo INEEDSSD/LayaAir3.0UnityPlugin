@@ -1,7 +1,7 @@
 ﻿Shader3D Start
 {
     type: Shader3D,
-    name: BR_Effect_Mask_Additive,
+    name: Particle_BR_Effect_Mask_Additive,
     enableInstancing: true,
     supportReflectionProbe: false,
     shaderType: Effect,

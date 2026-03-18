@@ -1,7 +1,7 @@
 ﻿Shader3D Start
 {
     type: Shader3D,
-    name: Effect_AParticleShader,
+    name: Particle_Effect_AParticleShader,
     enableInstancing: true,
     supportReflectionProbe: false,
     shaderType: Effect,

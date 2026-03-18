@@ -289,23 +289,13 @@ internal class MaterialFile : JsonFile
     /// <summary>
     /// Unity BlendMode 转换为 LayaAir BlendFactor
     /// </summary>
+    /// <summary>
+    /// Unity BlendMode 整数值 → Laya BlendFactor 整数值。
+    /// 通过运行时枚举名称映射，兼容不同 Unity 版本中枚举整数值不同的情况。
+    /// </summary>
     private static int ConvertUnityBlendToLaya(int unityBlend)
     {
-        switch (unityBlend)
-        {
-            case 0: return 0;  // Zero -> Zero
-            case 1: return 1;  // One -> One
-            case 2: return 4;  // DstColor -> DstColor
-            case 3: return 2;  // SrcColor -> SrcColor
-            case 4: return 5;  // OneMinusDstColor -> OneMinusDstColor
-            case 5: return 6;  // SrcAlpha -> SrcAlpha
-            case 6: return 7;  // OneMinusSrcAlpha -> OneMinusSrcAlpha [FIXED: was 3]
-            case 7: return 8;  // DstAlpha -> DstAlpha
-            case 8: return 9;  // OneMinusDstAlpha -> OneMinusDstAlpha
-            case 9: return 6;  // SrcAlphaSaturate -> SrcAlpha (近似)
-            case 10: return 3; // OneMinusSrcColor -> OneMinusSrcColor [FIXED: was 7]
-            default: return 1;
-        }
+        return CustomShaderExporter.UnityBlendToLaya(unityBlend);
     }
 
     protected override string getOutFilePath(string path)

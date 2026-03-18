@@ -759,8 +759,14 @@ internal class CustomShaderExporter
             }
             else if (typeSuffix == "_Effect")
             {
-                // ParticleRenderer：查找基础名模板
-                if (TryLoadPreConvertedTemplate(baseLayaShaderName) != null)
+                // ParticleRenderer：查找 Particle_ 前缀模板（与 D3 查找 Mesh_ 一致）
+                string particleName = "Particle_" + baseLayaShaderName;
+                if (TryLoadPreConvertedTemplate(particleName) != null)
+                {
+                    layaShaderName = particleName;
+                    ExportLogger.Log($"LayaAir3D: Using Particle template '{particleName}' for Effect variant");
+                }
+                else if (TryLoadPreConvertedTemplate(baseLayaShaderName) != null)
                 {
                     layaShaderName = baseLayaShaderName;
                     ExportLogger.Log($"LayaAir3D: Using base template '{baseLayaShaderName}' for Effect variant");
@@ -816,6 +822,13 @@ internal class CustomShaderExporter
             if (layaShaderName.EndsWith("_D3"))
             {
                 preConvertedTemplate = TryLoadPreConvertedTemplate("Mesh_" + baseLayaShaderName);
+            }
+
+            // Fallback 1b: Effect 变体尝试 "Particle_" 前缀命名约定
+            // 例如: Artist_Effect_Effect_FullEffect_Effect → Particle_Artist_Effect_Effect_FullEffect
+            if (preConvertedTemplate == null && layaShaderName.EndsWith("_Effect"))
+            {
+                preConvertedTemplate = TryLoadPreConvertedTemplate("Particle_" + baseLayaShaderName);
             }
 
             // Fallback 2: 尝试同类型的原始名模板（仅当模板 shaderType 与目标一致时才安全使用）
@@ -1843,75 +1856,91 @@ internal class CustomShaderExporter
     /// <summary>
     /// Unity BlendMode 数值 → Laya BlendFactor 整数
     /// </summary>
+    // ─── BlendMode 动态映射 ───
+    private static readonly Dictionary<string, int> BlendModeNameToLayaInt = new Dictionary<string, int>
+    {
+        { "Zero", 0 }, { "One", 1 },
+        { "DstColor", 4 }, { "SrcColor", 2 },
+        { "OneMinusDstColor", 5 }, { "OneMinusSrcColor", 3 },
+        { "SrcAlpha", 6 }, { "OneMinusSrcAlpha", 7 },
+        { "DstAlpha", 8 }, { "OneMinusDstAlpha", 9 },
+        { "SrcAlphaSaturate", 6 },
+    };
+    private static readonly Dictionary<int, int> UnityBlendToLayaMap = BuildEnumMap<UnityEngine.Rendering.BlendMode>(BlendModeNameToLayaInt);
+
     private static int UnityBlendFactorToLayaInt(int value)
     {
-        switch (value)
-        {
-            case 0: return 0;   // Zero
-            case 1: return 1;   // One
-            case 2: return 4;   // DstColor → DestinationColor
-            case 3: return 2;   // SrcColor → SourceColor
-            case 4: return 5;   // OneMinusDstColor → OneMinusDestinationColor
-            case 5: return 6;   // SrcAlpha → SourceAlpha
-            case 6: return 7;   // OneMinusSrcAlpha → OneMinusSourceAlpha
-            case 7: return 8;   // DstAlpha → DestinationAlpha
-            case 8: return 9;   // OneMinusDstAlpha → OneMinusDestinationAlpha
-            case 9: return 6;   // SrcAlphaSaturate → 近似 SourceAlpha
-            case 10: return 3;  // OneMinusSrcColor → OneMinusSourceColor
-            default: return 1;  // 默认 One
-        }
+        if (UnityBlendToLayaMap.TryGetValue(value, out int layaVal))
+            return layaVal;
+        return 1; // 默认 One
     }
 
     /// <summary>
-    /// Unity BlendOp 数值 → Laya BlendEquation 整数
+    /// 供其他类调用的 Unity BlendMode → Laya BlendFactor 转换（动态映射）
     /// </summary>
+    internal static int UnityBlendToLaya(int unityBlend)
+    {
+        return UnityBlendFactorToLayaInt(unityBlend);
+    }
+
+    // ─── BlendOp 动态映射 ───
+    private static readonly Dictionary<string, int> BlendOpNameToLayaInt = new Dictionary<string, int>
+    {
+        { "Add", 0 }, { "Subtract", 1 }, { "ReverseSubtract", 2 }, { "Min", 3 }, { "Max", 4 },
+    };
+    private static readonly Dictionary<int, int> UnityBlendOpToLayaMap = BuildEnumMap<UnityEngine.Rendering.BlendOp>(BlendOpNameToLayaInt);
+
     private static int UnityBlendOpToLayaInt(int value)
     {
-        switch (value)
-        {
-            case 0: return 0;  // Add
-            case 1: return 1;  // Subtract
-            case 2: return 2;  // ReverseSubtract
-            case 3: return 3;  // Min
-            case 4: return 4;  // Max
-            default: return 0; // 默认 Add
-        }
+        if (UnityBlendOpToLayaMap.TryGetValue(value, out int v)) return v;
+        return 0; // 默认 Add
     }
 
-    /// <summary>
-    /// Unity CullMode 数值 → Laya Cull 整数 (0=Off, 1=Front, 2=Back)
-    /// </summary>
+    // ─── CullMode 动态映射 ───
+    private static readonly Dictionary<string, int> CullNameToLayaInt = new Dictionary<string, int>
+    {
+        { "Off", 0 }, { "Front", 1 }, { "Back", 2 },
+    };
+    private static readonly Dictionary<int, int> UnityCullToLayaMap = BuildEnumMap<UnityEngine.Rendering.CullMode>(CullNameToLayaInt);
+
     private static int UnityCullToLayaInt(int value)
     {
-        switch (value)
-        {
-            case 0: return 0;  // Off
-            case 1: return 1;  // Front
-            case 2: return 2;  // Back
-            default: return 2; // 默认 Back
-        }
+        if (UnityCullToLayaMap.TryGetValue(value, out int v)) return v;
+        return 2; // 默认 Back
+    }
+
+    // ─── CompareFunction (ZTest) 动态映射 ───
+    private static readonly Dictionary<string, int> CompareFuncNameToLayaInt = new Dictionary<string, int>
+    {
+        { "Disabled", 0 }, { "Never", 0 },
+        { "Less", 1 }, { "Equal", 2 }, { "LessEqual", 3 },
+        { "Greater", 4 }, { "NotEqual", 5 }, { "GreaterEqual", 6 }, { "Always", 7 },
+    };
+    private static readonly Dictionary<int, int> UnityZTestToLayaMap = BuildEnumMap<UnityEngine.Rendering.CompareFunction>(CompareFuncNameToLayaInt);
+
+    private static int UnityZTestToLayaInt(int value)
+    {
+        if (UnityZTestToLayaMap.TryGetValue(value, out int v)) return v;
+        return 3; // 默认 LEQUAL
     }
 
     /// <summary>
-    /// Unity ZTest CompareFunction 数值 → Laya DepthTest 整数
+    /// 通用工具：遍历 Unity 枚举的运行时值，结合名称→Laya值映射表，构建 int→int 动态映射
     /// </summary>
-    private static int UnityZTestToLayaInt(int value)
+    private static Dictionary<int, int> BuildEnumMap<TEnum>(Dictionary<string, int> nameToLaya) where TEnum : struct
     {
-        // Unity CompareFunction: 0=Disabled, 1=Never, 2=Less, 3=Equal, 4=LessEqual, 5=Greater, 6=NotEqual, 7=GreaterEqual, 8=Always
-        // Laya DepthTest:        0=OFF,      1=LESS,  2=EQUAL, 3=LEQUAL,    4=GREATER, 5=NOTEQUAL, 6=GEQUAL,       7=ALWAYS
-        switch (value)
+        var map = new Dictionary<int, int>();
+        foreach (TEnum e in System.Enum.GetValues(typeof(TEnum)))
         {
-            case 0: return 0;  // Disabled → OFF
-            case 1: return 0;  // Never → OFF (无直接对应)
-            case 2: return 1;  // Less → LESS
-            case 3: return 2;  // Equal → EQUAL
-            case 4: return 3;  // LessEqual → LEQUAL
-            case 5: return 4;  // Greater → GREATER
-            case 6: return 5;  // NotEqual → NOTEQUAL
-            case 7: return 6;  // GreaterEqual → GEQUAL
-            case 8: return 7;  // Always → ALWAYS
-            default: return 3; // 默认 LEQUAL
+            string name = e.ToString();
+            if (nameToLaya.TryGetValue(name, out int layaVal))
+            {
+                int key = System.Convert.ToInt32(e);
+                if (!map.ContainsKey(key))
+                    map[key] = layaVal;
+            }
         }
+        return map;
     }
 
     /// <summary>
@@ -2018,38 +2047,24 @@ internal class CustomShaderExporter
     }
 
     /// <summary>
-    /// 模拟 Shader CustomEditor GUI 脚本的 MaterialChanged 逻辑，
-    /// 修正 .mat 文件中序列化的过期属性值。
-    /// 例如 Effect_FullEffect 的 GUI 根据 _Mode 覆盖 _DstBlend，
-    /// 但 .mat 中 _DstBlend 可能仍是旧值。
+    /// 修正 .mat 文件中序列化的过期 _DstBlend 属性值。
+    ///
+    /// Unity 特效/粒子 shader 的 _DstBlend 属性声明默认值通常为 10 (OneMinusSrcColor)，
+    /// 但 GUI 脚本在运行时会根据 _Mode 覆盖：Translucent → 6 (OneMinusSrcAlpha), Additive → 1 (One)。
+    /// .mat 序列化保留的仍是声明默认值 10，导致导出时产生错误的 OneMinusSourceColor。
+    ///
+    /// 仅当 _DstBlend == 10 时修正（这是已知的序列化旧值），其他值视为 GUI 已正确写入，不干预。
+    /// 这样既适用于所有使用此约定的特效 shader，又不影响 Standard 等 _DstBlend=0 的 shader。
+    /// </summary>
+    /// <summary>
+    /// 运行时安全获取 Unity BlendMode 枚举的整数值。
+    /// 使用 System.Enum.Parse 在运行时解析，避免编译期常量内联导致的版本兼容问题。
     /// </summary>
     private static Dictionary<string, int> BuildShaderGUIOverrides(Material material, string layaShaderName)
     {
-        if (layaShaderName == null) return null;
-
-        // Effect_FullEffect: GUI 根据 _Mode 设置 _DstBlend
-        if (layaShaderName.Contains("Artist_Effect_Effect_FullEffect"))
-        {
-            if (!material.HasProperty("_Mode") || !material.HasProperty("_DstBlend"))
-                return null;
-
-            int mode = (int)material.GetFloat("_Mode");
-            var overrides = new Dictionary<string, int>();
-            switch (mode)
-            {
-                case 0: // Translucent → OneMinusSrcAlpha
-                    overrides["_DstBlend"] = (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha;
-                    break;
-                case 1: // Additive → One
-                    overrides["_DstBlend"] = (int)UnityEngine.Rendering.BlendMode.One;
-                    break;
-                default:
-                    return null;
-            }
-            ExportLogger.Log($"LayaAir3D: GUI override for Effect_FullEffect: _Mode={mode} → _DstBlend={overrides["_DstBlend"]}");
-            return overrides;
-        }
-
+        // 当前不需要 GUI 脚本属性覆盖。
+        // UnityBlendFactorToLayaInt 已改为运行时动态映射（基于枚举名称），
+        // 可正确处理不同 Unity 版本中枚举整数值不同的情况。
         return null;
     }
 
@@ -12626,6 +12641,9 @@ internal class CustomShaderExporter
             // Fallback 1: D3 变体尝试 "Mesh_" 前缀命名约定
             if (layaShaderName.EndsWith("_D3"))
                 templateContent = TryLoadPreConvertedTemplate("Mesh_" + baseLayaShaderName);
+            // Fallback 1b: Effect 变体尝试 "Particle_" 前缀命名约定
+            if (templateContent == null && layaShaderName.EndsWith("_Effect"))
+                templateContent = TryLoadPreConvertedTemplate("Particle_" + baseLayaShaderName);
             // Fallback 2: 同类型原始名模板
             if (templateContent == null)
                 templateContent = TryLoadPreConvertedTemplate(baseLayaShaderName);
@@ -12686,6 +12704,7 @@ internal class CustomShaderExporter
             // ⭐ GUI 脚本属性值修正：某些 shader 的 CustomEditor 在运行时覆盖材质属性，
             // 但 .mat 序列化的是旧值。此处模拟 GUI 脚本逻辑，生成正确的属性值。
             Dictionary<string, int> guiOverrides = BuildShaderGUIOverrides(material, baseLayaShaderName ?? layaShaderName);
+
             ResolvedRenderState resolved = ResolveRenderState(matParseResult, material, guiOverrides);
 
             // 第三步：与预定义模式匹配

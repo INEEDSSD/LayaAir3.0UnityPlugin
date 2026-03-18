@@ -1,7 +1,7 @@
 ﻿Shader3D Start
 {
     type:Shader3D,
-    name: "Sanguo_Sanguo_particle_distort_add",
+    name: "Particle_Sanguo_Sanguo_particle_distort_add",
     enableInstancing:true,
     supportReflectionProbe:false,
     shaderType:Effect,

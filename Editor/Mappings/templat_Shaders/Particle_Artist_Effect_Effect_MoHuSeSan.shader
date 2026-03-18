@@ -1,7 +1,7 @@
 ﻿Shader3D Start
 {
     type:Shader3D,
-    name:Artist_Effect_Effect_MoHuSeSan,
+    name:Particle_Artist_Effect_Effect_MoHuSeSan,
     enableInstancing:true,
     supportReflectionProbe:false,
     shaderType:Effect,
