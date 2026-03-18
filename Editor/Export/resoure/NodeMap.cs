@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.UI;
 
 struct OriderIndex
 {
@@ -79,7 +80,17 @@ internal class NodeMap
         {
             return;
         }
-        JSONObject nodeData = JsonUtils.GetGameObject(gameObject, isperfabRoot);
+        // UI Image 使用 2D 节点构建（无 3D transform）
+        bool isUIImage = gameObject.GetComponent<UnityEngine.UI.Image>() != null;
+        JSONObject nodeData;
+        if (isUIImage)
+        {
+            nodeData = JsonUtils.GetImageNode(gameObject);
+        }
+        else
+        {
+            nodeData = JsonUtils.GetGameObject(gameObject, isperfabRoot);
+        }
         int nodeId = this.refMap.Count + this.idOff;
         string nodeStringId = "#" + nodeId;
         this.nodeIdMaps.Add(gameObject, nodeStringId);
@@ -115,8 +126,9 @@ internal class NodeMap
         {
             nodeData.AddField("_$prefab", refObject.getBasePerfab().uuid);
         }
-        else
+        else if (!isUIImage)
         {
+            // UI Image 节点的 _$type 由 ResoureMap.getComponentsData 写入
             nodeData.AddField("_$type", "Sprite3D");
         }
 

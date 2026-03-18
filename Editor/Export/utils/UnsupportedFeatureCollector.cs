@@ -26,7 +26,7 @@ public static class UnsupportedFeatureCollector
         { typeof(Terrain), "Terrain（地形） - 仅部分支持" },
         { typeof(AudioSource), "AudioSource（音频源）" },
         { typeof(AudioListener), "AudioListener（音频监听器）" },
-        { typeof(Canvas), "Canvas（UI画布）" },
+        // Canvas is now supported as a container for UI Image export
         { typeof(VideoPlayer), "VideoPlayer（视频播放器）" },
         // 物理组件
         { typeof(Rigidbody), "Rigidbody（刚体）" },

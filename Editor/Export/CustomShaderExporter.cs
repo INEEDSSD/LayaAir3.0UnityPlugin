@@ -419,6 +419,9 @@ internal class CustomShaderExporter
             {
                 { "_MainTex", "u_texture" },
                 { "_BaseMap", "u_texture" },
+                // DistortTex0（带数字后缀）在模板中是 u_DistortTex（不带后缀）
+                { "_DistortTex0", "u_DistortTex" },
+                { "_DistortStrength0", "u_DistortStrength" },
             }
         },
         // Artist_Effect_MoHuSeSan: Mask贴图小写 u_mask
@@ -444,6 +447,71 @@ internal class CustomShaderExporter
                 { "LayerType", new[] { "EFFECT_LAYER_ONE", "EFFECT_LAYER_TWO", "EFFECT_LAYER_THREE" } },
                 // [KeywordEnum(Default, Clamp, Repeat)] _WrapMode (Float): 0=DEFAULT, 1=CLAMP, 2=REPEAT
                 { "WrapMode", new[] { "EFFECT_WRAPMODE_DEFAULT", "EFFECT_WRAPMODE_CLAMP", "EFFECT_WRAPMODE_REPEAT" } },
+            }
+        },
+    };
+
+    // ==================== 模板Shader Keyword → Define 映射 ====================
+    // Unity keyword（如 _USEDISTORT0_ON）→ 模板Shader define（如 EFFECT_DISTORT）
+    // RadioGroup 枚举类的 keyword 已由 RadioGroupDefineMappings 处理，此处只映射 bool 开关型 keyword
+    private static readonly Dictionary<string, Dictionary<string, string>> TemplateKeywordMappings
+        = new Dictionary<string, Dictionary<string, string>>
+    {
+        {
+            "Artist_Effect_Effect_FullEffect", new Dictionary<string, string>
+            {
+                { "_USEDISTORT0_ON", "EFFECT_DISTORT" },
+                { "_USEDISSOLVE_ON", "EFFECT_DISSOLVE" },
+                { "_USEFADEEDGE_ON", "EFFECT_FADE_EDGE" },
+                { "_USEDISSOLVEDISTORT_ON", "EFFECT_DISSOLVE_DISTORT" },
+                { "_USERIM_ON", "EFFECT_RIM" },
+                { "_USERIMMAP_ON", "EFFECT_RIM_MAP" },
+                { "_USELIGHTING_ON", "EFFECT_LIGHTING" },
+                { "_USEVERTEXOFFSET_ON", "EFFECT_VERTEX_OFFSET" },
+                { "_USEPOLAR_ON", "EFFECT_POLAR" },
+                { "_USEGRADIENTMAP0_ON", "EFFECT_GRADIENT_MAP" },
+                { "_USENORMALMAPFORRIM_ON", "EFFECT_NORMAL_MAP_RIM" },
+                { "_ROTATIONTEX_ON", "EFFECT_ROTATION" },
+                { "_ROTATIONTEXTWO_ON", "EFFECT_ROTATION_TWO" },
+                { "_ROTATIONTEXTHREE_ON", "EFFECT_ROTATION_THREE" },
+                { "_ROTATIONTEXFOUR_ON", "EFFECT_ROTATION_FOUR" },
+            }
+        },
+    };
+
+    // 当前模板shader的 Keyword 映射（ExportMaterialFile 开始时设置）
+    private static Dictionary<string, string> _currentTemplateKeywordMappings = null;
+
+    // ==================== 模板Shader Float→Vector2 组合规则 ====================
+    // 将两个 Unity Float 属性合并为一个 Laya Vector2 属性
+    // 适用于模板shader中 Vector2 类型的 uniform（如 u_Scroll0），对应 Unity 中分开的 X/Y float
+    private struct Vector2AssemblyRule
+    {
+        public string xProp;    // Unity float 属性名（X分量）
+        public string yProp;    // Unity float 属性名（Y分量）
+        public string layaName; // Laya Vector2 属性名
+    }
+
+    private static readonly Dictionary<string, Vector2AssemblyRule[]> TemplateVector2Assemblies
+        = new Dictionary<string, Vector2AssemblyRule[]>
+    {
+        {
+            "Artist_Effect_Effect_FullEffect", new Vector2AssemblyRule[]
+            {
+                new Vector2AssemblyRule { xProp = "_Scroll0X", yProp = "_Scroll0Y", layaName = "u_Scroll0" },
+                new Vector2AssemblyRule { xProp = "_Scroll1X", yProp = "_Scroll1Y", layaName = "u_Scroll1" },
+                new Vector2AssemblyRule { xProp = "_Scroll2X", yProp = "_Scroll2Y", layaName = "u_Scroll2" },
+                new Vector2AssemblyRule { xProp = "_Distort0X", yProp = "_Distort0Y", layaName = "u_DistortScroll" },
+                new Vector2AssemblyRule { xProp = "_RotateCenterX", yProp = "_RotateCenterY", layaName = "u_RotateCenter" },
+                new Vector2AssemblyRule { xProp = "_TranslationX", yProp = "_TranslationY", layaName = "u_Translation" },
+                new Vector2AssemblyRule { xProp = "_RotateCenterX02", yProp = "_RotateCenterY02", layaName = "u_RotateCenter02" },
+                new Vector2AssemblyRule { xProp = "_TranslationX02", yProp = "_TranslationY02", layaName = "u_Translation02" },
+                new Vector2AssemblyRule { xProp = "_RotateCenterX03", yProp = "_RotateCenterY03", layaName = "u_RotateCenter03" },
+                new Vector2AssemblyRule { xProp = "_TranslationX03", yProp = "_TranslationY03", layaName = "u_Translation03" },
+                new Vector2AssemblyRule { xProp = "_RotateCenterX04", yProp = "_RotateCenterY04", layaName = "u_RotateCenter04" },
+                new Vector2AssemblyRule { xProp = "_TranslationX04", yProp = "_TranslationY04", layaName = "u_Translation04" },
+                new Vector2AssemblyRule { xProp = "_DissolveDistortX", yProp = "_DissolveDistortY", layaName = "u_DissolveDistortScroll" },
+                new Vector2AssemblyRule { xProp = "_VertexAmplitudeTexScroll0X", yProp = "_VertexAmplitudeTexScroll0Y", layaName = "u_VertexAmplitudeTexScroll" },
             }
         },
     };
@@ -1950,10 +2018,51 @@ internal class CustomShaderExporter
     }
 
     /// <summary>
+    /// 模拟 Shader CustomEditor GUI 脚本的 MaterialChanged 逻辑，
+    /// 修正 .mat 文件中序列化的过期属性值。
+    /// 例如 Effect_FullEffect 的 GUI 根据 _Mode 覆盖 _DstBlend，
+    /// 但 .mat 中 _DstBlend 可能仍是旧值。
+    /// </summary>
+    private static Dictionary<string, int> BuildShaderGUIOverrides(Material material, string layaShaderName)
+    {
+        if (layaShaderName == null) return null;
+
+        // Effect_FullEffect: GUI 根据 _Mode 设置 _DstBlend
+        if (layaShaderName.Contains("Artist_Effect_Effect_FullEffect"))
+        {
+            if (!material.HasProperty("_Mode") || !material.HasProperty("_DstBlend"))
+                return null;
+
+            int mode = (int)material.GetFloat("_Mode");
+            var overrides = new Dictionary<string, int>();
+            switch (mode)
+            {
+                case 0: // Translucent → OneMinusSrcAlpha
+                    overrides["_DstBlend"] = (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha;
+                    break;
+                case 1: // Additive → One
+                    overrides["_DstBlend"] = (int)UnityEngine.Rendering.BlendMode.One;
+                    break;
+                default:
+                    return null;
+            }
+            ExportLogger.Log($"LayaAir3D: GUI override for Effect_FullEffect: _Mode={mode} → _DstBlend={overrides["_DstBlend"]}");
+            return overrides;
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// 将 ShaderParseResult 中的渲染状态 token 与 Material 的实际属性值合并，
     /// 得到该材质实际生效的 Laya 渲染参数
     /// </summary>
-    private static ResolvedRenderState ResolveRenderState(ShaderParseResult parseResult, Material material)
+    /// <param name="propertyOverrides">
+    /// GUI 脚本属性值覆盖：某些 shader 的 CustomEditor GUI 会在运行时修改材质属性（如 _DstBlend），
+    /// 但 .mat 序列化的是旧值。此字典提供 GUI 脚本逻辑修正后的实际值。
+    /// </param>
+    private static ResolvedRenderState ResolveRenderState(ShaderParseResult parseResult, Material material,
+        Dictionary<string, int> propertyOverrides = null)
     {
         var resolved = new ResolvedRenderState();
 
@@ -1964,15 +2073,15 @@ internal class CustomShaderExporter
             bool isSeparate = parseResult.blendSrcAlpha != null;
             resolved.s_Blend = isSeparate ? 2 : 1;
 
-            int srcRGB = ResolveBlendFactor(parseResult.blendSrc, material);
-            int dstRGB = ResolveBlendFactor(parseResult.blendDst, material);
+            int srcRGB = ResolveBlendFactor(parseResult.blendSrc, material, propertyOverrides);
+            int dstRGB = ResolveBlendFactor(parseResult.blendDst, material, propertyOverrides);
 
             if (isSeparate)
             {
                 resolved.s_BlendSrcRGB = srcRGB;
                 resolved.s_BlendDstRGB = dstRGB;
-                resolved.s_BlendSrcAlpha = ResolveBlendFactor(parseResult.blendSrcAlpha, material);
-                resolved.s_BlendDstAlpha = ResolveBlendFactor(parseResult.blendDstAlpha, material);
+                resolved.s_BlendSrcAlpha = ResolveBlendFactor(parseResult.blendSrcAlpha, material, propertyOverrides);
+                resolved.s_BlendDstAlpha = ResolveBlendFactor(parseResult.blendDstAlpha, material, propertyOverrides);
             }
             else
             {
@@ -2018,12 +2127,19 @@ internal class CustomShaderExporter
     /// <summary>
     /// 解析 blend factor token → Laya BlendParam int
     /// </summary>
-    private static int ResolveBlendFactor(string token, Material material)
+    private static int ResolveBlendFactor(string token, Material material,
+        Dictionary<string, int> propertyOverrides = null)
     {
         if (IsPropertyReference(token))
         {
             string pn = ExtractPropertyName(token);
-            int val = material.HasProperty(pn) ? material.GetInt(pn) : 0;
+            // 优先使用 GUI 脚本覆盖值（修正序列化过期值）
+            int val;
+            if (propertyOverrides != null && propertyOverrides.TryGetValue(pn, out val))
+            {
+                return UnityBlendFactorToLayaInt(val);
+            }
+            val = material.HasProperty(pn) ? material.GetInt(pn) : 0;
             return UnityBlendFactorToLayaInt(val);
         }
         return UnityBlendFactorNameToLayaInt(token);
@@ -3166,15 +3282,6 @@ internal class CustomShaderExporter
         }
         else
         {
-            // 如果使用了顶点颜色，添加COLOR和ENABLEVERTEXCOLOR宏
-            if (parseResult.usesVertexColor)
-            {
-                sb.AppendLine("        COLOR: { type: bool, default: true },");
-                addedDefines.Add("COLOR");
-                sb.AppendLine("        ENABLEVERTEXCOLOR: { type: bool, default: true },");
-                addedDefines.Add("ENABLEVERTEXCOLOR");
-            }
-
             // 如果使用了UV，添加UV宏
             if (parseResult.usesUV)
             {
@@ -12539,6 +12646,12 @@ internal class CustomShaderExporter
         else if (baseLayaShaderName != null && RadioGroupDefineMappings.TryGetValue(baseLayaShaderName, out hardcodedGroups))
             _currentTemplateRadioGroups = hardcodedGroups;
 
+        // Keyword → Define 映射上下文
+        if (TemplateKeywordMappings.TryGetValue(layaShaderName, out var kwMap))
+            _currentTemplateKeywordMappings = kwMap;
+        else if (baseLayaShaderName != null && TemplateKeywordMappings.TryGetValue(baseLayaShaderName, out kwMap))
+            _currentTemplateKeywordMappings = kwMap;
+
         jsonData.AddField("version", "LAYAMATERIAL:04");
         JSONObject props = new JSONObject(JSONObject.Type.OBJECT);
         jsonData.AddField("props", props);
@@ -12570,7 +12683,10 @@ internal class CustomShaderExporter
             ParseRenderState(matShaderSource, matParseResult);
 
             // 第二步：结合材质数据，解析出实际生效的 Laya 渲染参数
-            ResolvedRenderState resolved = ResolveRenderState(matParseResult, material);
+            // ⭐ GUI 脚本属性值修正：某些 shader 的 CustomEditor 在运行时覆盖材质属性，
+            // 但 .mat 序列化的是旧值。此处模拟 GUI 脚本逻辑，生成正确的属性值。
+            Dictionary<string, int> guiOverrides = BuildShaderGUIOverrides(material, baseLayaShaderName ?? layaShaderName);
+            ResolvedRenderState resolved = ResolveRenderState(matParseResult, material, guiOverrides);
 
             // 第三步：与预定义模式匹配
             matchedRenderMode = MatchRenderMode(resolved);
@@ -12667,8 +12783,23 @@ internal class CustomShaderExporter
         JSONObject textures = new JSONObject(JSONObject.Type.ARRAY);
         List<string> defines = new List<string>();
 
-        // Unity shaderKeywords（shader_feature）不导出：LayaAir 不支持 shader variant 机制，
-        // 相关功能开关通过 RadioGroup Int 属性推导出对应的 defines（见下方 Int case 处理）
+        // ⭐ Unity shaderKeywords → 模板 defines 映射
+        // 对于有 TemplateKeywordMappings 的 shader，直接从材质的 shaderKeywords 映射到模板定义的 define 名
+        // 对于没有映射的 shader，相关功能开关通过 RadioGroup Int 属性推导（见下方 Int case 处理）
+        if (_currentTemplateKeywordMappings != null)
+        {
+            foreach (string keyword in material.shaderKeywords)
+            {
+                if (_currentTemplateKeywordMappings.TryGetValue(keyword, out string define))
+                {
+                    if (!defines.Contains(define))
+                    {
+                        defines.Add(define);
+                        ExportLogger.Log($"LayaAir3D: Mapped Unity keyword '{keyword}' → define '{define}'");
+                    }
+                }
+            }
+        }
 
         // ★ 检测是否是 2D shader
         bool is2DMaterial = materialFile != null && materialFile.IsUsedBy2DComponent();
@@ -12680,12 +12811,12 @@ internal class CustomShaderExporter
         bool hasNPR = (materialType == LayaMaterialType.PBR || materialType == LayaMaterialType.Custom) && HasNPRFeatures(shaderProperties);
         bool hasEmission = false;
 
-        // ⭐ FIX 3/3: 不再自动为Effect类型添加COLOR和ENABLEVERTEXCOLOR
-        // 这些defines应该由Keywords映射生成，或者由shader特征检测生成
-        // 粒子shader（如Artist_Effect系列）使用不同的渲染逻辑，不需要这些defines
-
-        // 检测shader源码中是否使用了顶点颜色
+        // 检测shader源码中是否使用了顶点颜色，自动添加 ENABLEVERTEXCOLOR define
         bool usesVertexColor = DetectVertexColorInShader(shader);
+        if (usesVertexColor && !defines.Contains("ENABLEVERTEXCOLOR"))
+        {
+            defines.Add("ENABLEVERTEXCOLOR");
+        }
         
         int propertyCount = ShaderUtil.GetPropertyCount(shader);
         for (int i = 0; i < propertyCount; i++)
@@ -12827,9 +12958,12 @@ internal class CustomShaderExporter
                     break;
             }
         }
-        
+
+        // ⭐ 组装 Vector2 属性：将 Unity 的分离 float 属性（如 _Scroll0X/_Scroll0Y）合并为 Laya Vector2
+        AssembleTemplateVector2Properties(material, layaShaderName, baseLayaShaderName, props);
+
         props.AddField("textures", textures);
-        
+
         // 根据材质类型添加功能性宏定义
         if (materialType == LayaMaterialType.PBR || materialType == LayaMaterialType.Custom)
         {
@@ -12843,33 +12977,9 @@ internal class CustomShaderExporter
                 defines.Add("EMISSION");
             }
             
-            // 如果使用了顶点颜色，添加COLOR和ENABLEVERTEXCOLOR宏
-            if (usesVertexColor)
-            {
-                if (!defines.Contains("COLOR"))
-                {
-                    defines.Add("COLOR");
-                }
-                if (!defines.Contains("ENABLEVERTEXCOLOR"))
-                {
-                    defines.Add("ENABLEVERTEXCOLOR");
-                }
-            }
         }
         else if (materialType == LayaMaterialType.BLINNPHONG || materialType == LayaMaterialType.Unlit)
         {
-            // BlinnPhong和Unlit类型：如果使用了顶点颜色，添加COLOR和ENABLEVERTEXCOLOR宏
-            if (usesVertexColor)
-            {
-                if (!defines.Contains("COLOR"))
-                {
-                    defines.Add("COLOR");
-                }
-                if (!defines.Contains("ENABLEVERTEXCOLOR"))
-                {
-                    defines.Add("ENABLEVERTEXCOLOR");
-                }
-            }
         }
         // ⭐ Note: Effect类型（粒子）的宏定义由Keywords映射自动生成，不再手动添加
 
@@ -12914,12 +13024,55 @@ internal class CustomShaderExporter
         _currentTemplateVarNames = null;
         _currentTemplatePropertyOverrides = null;
         _currentTemplateRadioGroups = null;
+        _currentTemplateKeywordMappings = null;
+    }
+
+    /// <summary>
+    /// 组装 Vector2 属性：将 Unity 中分开存储的 float 属性对合并为 Laya 的 Vector2 属性。
+    /// 例如 Unity 的 _Scroll0X + _Scroll0Y → Laya 的 u_Scroll0: [x, y]
+    /// </summary>
+    private static void AssembleTemplateVector2Properties(Material material, string layaShaderName, string baseLayaShaderName, JSONObject props)
+    {
+        Vector2AssemblyRule[] rules = null;
+
+        if (layaShaderName != null && TemplateVector2Assemblies.TryGetValue(layaShaderName, out rules))
+        {
+            // found
+        }
+        else if (baseLayaShaderName != null && TemplateVector2Assemblies.TryGetValue(baseLayaShaderName, out rules))
+        {
+            // found
+        }
+
+        if (rules == null) return;
+
+        foreach (var rule in rules)
+        {
+            bool hasX = material.HasProperty(rule.xProp);
+            bool hasY = material.HasProperty(rule.yProp);
+
+            if (!hasX && !hasY) continue;
+
+            float x = hasX ? material.GetFloat(rule.xProp) : 0f;
+            float y = hasY ? material.GetFloat(rule.yProp) : 0f;
+
+            // 模板验证：只有模板中存在该属性时才导出
+            if (_currentTemplateVarNames != null && !_currentTemplateVarNames.Contains(rule.layaName))
+                continue;
+
+            JSONObject vec2 = new JSONObject(JSONObject.Type.ARRAY);
+            vec2.Add(x);
+            vec2.Add(y);
+            props.AddField(rule.layaName, vec2);
+
+            ExportLogger.Log($"LayaAir3D: Assembled Vector2 '{rule.xProp}'+'{rule.yProp}' → '{rule.layaName}': [{x}, {y}]");
+        }
     }
 
     /// <summary>
     /// 导出纹理属性
     /// </summary>
-    private static void ExportTextureProperty(Material material, string propName, string layaName, 
+    private static void ExportTextureProperty(Material material, string propName, string layaName,
         JSONObject textures, List<string> defines, ResoureMap resoureMap, Shader shader = null, int propertyIndex = -1)
     {
         if (!material.HasProperty(propName)) return;
@@ -13122,9 +13275,9 @@ internal class CustomShaderExporter
         }
         else
         {
-            // 其他纹理使用 u_XXX_ST（去掉前缀 _，添加后缀 _ST）
-            string texName = unityPropName.TrimStart('_');
-            tilingOffsetName = "u_" + texName + "_ST";
+            // 使用 Laya 属性名构造 _ST（这样 TemplatePropertyOverrides 的重命名会被正确传递）
+            // 例如：_DistortTex0 → layaPropName="u_DistortTex" → tilingOffsetName="u_DistortTex_ST"
+            tilingOffsetName = layaPropName + "_ST";
         }
 
         // ⭐ 有模板上下文时：验证 tilingOffsetName 是否在模板变量集合中（大小写不敏感）

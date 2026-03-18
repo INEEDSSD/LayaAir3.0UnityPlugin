@@ -115,6 +115,26 @@ internal class JsonUtils
         return transfrom;
     }
 
+    /// <summary>
+    /// 构建 2D UI Image 节点 JSON（不含 3D transform，使用 RectTransform 的 2D 坐标）
+    /// </summary>
+    public static JSONObject GetImageNode(GameObject go)
+    {
+        JSONObject node = new JSONObject(JSONObject.Type.OBJECT);
+        node.AddField("name", go.name);
+        node.AddField("active", go.activeSelf);
+
+        RectTransform rt = go.GetComponent<RectTransform>();
+        if (rt != null)
+        {
+            node.AddField("x", rt.anchoredPosition.x);
+            node.AddField("y", -rt.anchoredPosition.y); // Unity Y↑ → Laya Y↓
+            node.AddField("width", rt.sizeDelta.x);
+            node.AddField("height", rt.sizeDelta.y);
+        }
+        return node;
+    }
+
     public static JSONObject GetGameObject(GameObject gObject,bool isperfabRoot = false, JSONObject nodeData = null)
     {
         if(nodeData == null)

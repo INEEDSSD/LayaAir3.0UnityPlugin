@@ -3,6 +3,7 @@ using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.UI;
 
 using LayaExport;
 
@@ -354,6 +355,15 @@ internal class ResoureMap
         // 检查不支持的组件
         UnsupportedFeatureCollector.CheckGameObject(gameObject);
 
+        // UI Image 优先检测 — 写入 2D 属性后直接返回，不写 _$comp
+        UnityEngine.UI.Image uiImage = gameObject.GetComponent<UnityEngine.UI.Image>();
+        if (uiImage != null)
+        {
+            node.AddField("_$type", "Image");
+            WriteImageData(node, uiImage);
+            return;
+        }
+
         Camera camera = gameObject.GetComponent<Camera>();
         if (camera != null)
         {
@@ -376,6 +386,42 @@ internal class ResoureMap
             this.writeComponentData(compents, comp, map,false);
         }
 
+    }
+
+    /// <summary>
+    /// 写入 UI Image 的 skin、color、useSourceSize 属性
+    /// </summary>
+    private void WriteImageData(JSONObject node, UnityEngine.UI.Image image)
+    {
+        // 导出 sprite 纹理 → skin
+        if (image.sprite != null && image.sprite.texture != null)
+        {
+            TextureFile textureFile = this.GetTextureFile(image.sprite.texture, false, true);
+            if (textureFile != null)
+            {
+                node.AddField("skin", "res://" + textureFile.uuid);
+            }
+        }
+
+        // color → "#rrggbb" 或 "#rrggbbaa"
+        Color c = image.color;
+        int r = Mathf.RoundToInt(c.r * 255);
+        int g = Mathf.RoundToInt(c.g * 255);
+        int b = Mathf.RoundToInt(c.b * 255);
+        int a = Mathf.RoundToInt(c.a * 255);
+        string colorHex;
+        if (a < 255)
+            colorHex = string.Format("#{0:x2}{1:x2}{2:x2}{3:x2}", r, g, b, a);
+        else
+            colorHex = string.Format("#{0:x2}{1:x2}{2:x2}", r, g, b);
+        node.AddField("color", colorHex);
+
+        // useSourceSize: Simple 模式且 preserveAspect 时为 true
+        bool useSourceSize = image.type == UnityEngine.UI.Image.Type.Simple && image.preserveAspect;
+        if (useSourceSize)
+        {
+            node.AddField("useSourceSize", true);
+        }
     }
 
     public void writeComponentData(JSONObject compents,Component comp, NodeMap map, bool isOverride)
@@ -429,6 +475,24 @@ internal class ResoureMap
         else if(comp is ParticleSystem)
         {
             int mode = GetParticleExportMode(gameObject);
+
+            // 自动检测日志：当无手动设置且自动切换为 CPU 时，提示用户触发原因
+            if (mode == 1 && FindParticleExportSetting(gameObject) < 0)
+            {
+                ParticleSystem _ps = comp as ParticleSystem;
+                if (_ps != null)
+                {
+                    var reasons = new System.Collections.Generic.List<string>();
+                    if (_ps.limitVelocityOverLifetime.enabled) reasons.Add("LimitVelocityOverLifetime");
+                    if (_ps.trails.enabled) reasons.Add("Trails");
+                    if (_ps.noise.enabled) reasons.Add("Noise");
+                    if (reasons.Count > 0)
+                    {
+                        Debug.Log($"[LayaAir Export] '{gameObject.name}': 检测到 GPU 不支持的模块 [{string.Join(", ", reasons)}]，自动切换为 CPU 粒子导出。");
+                    }
+                }
+            }
+
             if (mode == 0) // Shuriken (GPU)
             {
                 JSONObject particleComp = LayaParticleExportV2.ExportParticleSystemV2(gameObject, this);
@@ -1463,6 +1527,10 @@ internal class ResoureMap
             parent = parent.parent;
         }
 
+        // 自动检测：GPU 不支持的模块 → 强制 CPU
+        if (RequiresCPUParticle(gameObject))
+            return 1;
+
         return ExportConfig.ParticleExportMode;
     }
 
@@ -1471,6 +1539,20 @@ internal class ResoureMap
     /// 避免 Editor 与 Runtime 程序集类型不一致导致 GetComponent&lt;T&gt; 返回 null 的问题。
     /// 返回 -1 表示未找到。
     /// </summary>
+    /// <summary>
+    /// 检测粒子系统是否使用了 GPU 导出不支持的模块（LimitVelocityOverLifetime / Trails / Noise），
+    /// 若是则需要强制使用 CPU 粒子导出。
+    /// </summary>
+    private static bool RequiresCPUParticle(GameObject gameObject)
+    {
+        ParticleSystem ps = gameObject.GetComponent<ParticleSystem>();
+        if (ps == null) return false;
+        if (ps.limitVelocityOverLifetime.enabled) return true;
+        if (ps.trails.enabled) return true;
+        if (ps.noise.enabled) return true;
+        return false;
+    }
+
     private static int FindParticleExportSetting(GameObject go)
     {
         foreach (var comp in go.GetComponents<MonoBehaviour>())

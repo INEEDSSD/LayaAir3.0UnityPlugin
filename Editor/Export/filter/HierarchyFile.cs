@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.UI;
 using UnityEditor.SceneManagement;
 using System.IO;
 using UnityEngine.SceneManagement;
@@ -220,9 +221,45 @@ internal class HierarchyFile
         scene3dNode.AddField("_$child", child);
         for (int i = 0; i < gameObjects.Length; i++)
         {
-            child.Add(this.nodeMap.getJsonObject(gameObjects[i].gameObject));
+            GameObject go = gameObjects[i].gameObject;
+            if (go.GetComponent<Canvas>() != null)
+            {
+                // Canvas 子节点直接加到 Scene2D（fchild），不进入 Scene3D
+                CollectImageChildren(go, fchild);
+            }
+            else
+            {
+                child.Add(this.nodeMap.getJsonObject(go));
+            }
         }
 
         this.resouremap.AddExportFile(new JsonFile(sceneName, node));
+    }
+
+    /// <summary>
+    /// 递归遍历 Canvas 子树，将含有 Image 组件的节点加到 Scene2D 的 _$child
+    /// </summary>
+    private void CollectImageChildren(GameObject parent, JSONObject scene2DChildren)
+    {
+        for (int i = 0; i < parent.transform.childCount; i++)
+        {
+            GameObject child = parent.transform.GetChild(i).gameObject;
+            if (!child.activeInHierarchy && ExportConfig.IgnoreNotActiveGameObject)
+                continue;
+
+            if (child.GetComponent<UnityEngine.UI.Image>() != null)
+            {
+                JSONObject jsonNode = this.nodeMap.getJsonObject(child);
+                if (jsonNode != null)
+                {
+                    scene2DChildren.Add(jsonNode);
+                }
+            }
+            else
+            {
+                // 递归查找嵌套的 Image 节点
+                CollectImageChildren(child, scene2DChildren);
+            }
+        }
     }
 }
