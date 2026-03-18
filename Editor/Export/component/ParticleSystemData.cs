@@ -484,8 +484,8 @@ internal class ParticleSystemData
         compData.AddField("sortMode", (int)(object)renderer.sortMode);
         compData.AddField("alignment", (int)(object)renderer.alignment);
 
-        if (renderer.sharedMaterial) { compData.AddField("material", map.GetMaterialData(renderer.sharedMaterial)); }
-        if (renderer.trailMaterial) compData.AddField("trailMaterial", map.GetMaterialData(renderer.trailMaterial));
+        if (renderer.sharedMaterial) { compData.AddField("material", map.GetMaterialData(renderer.sharedMaterial, renderer, true)); }
+        if (renderer.trailMaterial) compData.AddField("trailMaterial", map.GetMaterialData(renderer.trailMaterial, renderer, true));
 
         compData.AddField("cameraVelocityScale", renderer.cameraVelocityScale);
         compData.AddField("velocityScale", renderer.velocityScale);

@@ -517,6 +517,7 @@ public class PropDatasConfig
 internal class MetarialUitls 
 {
     public static Dictionary<string, PropDatasConfig> MaterialPropsConfigs;
+    public static Dictionary<string, PropDatasConfig> CPUParticleMaterialPropsConfigs;
 
     public static void init()
     {
@@ -652,7 +653,111 @@ internal class MetarialUitls
             }
         }
 
+        // Load CPU particle override config
+        CPUParticleMaterialPropsConfigs = new Dictionary<string, PropDatasConfig>();
+        string cpuConfigPath = Util.FileUtil.getPluginResUrl("MetarialPropData_CPUParticle.json");
+        if (File.Exists(cpuConfigPath))
+        {
+            JSONObject cpuMetaDatas = JSONObject.Create(File.ReadAllText(cpuConfigPath));
+            int cpuCount = cpuMetaDatas.Count;
+            for (int i = 0; i < cpuCount; i++)
+            {
+                string key = cpuMetaDatas.keys[i];
+                if (key.StartsWith("_")) continue; // skip _comment etc.
+                JSONObject mJdata = cpuMetaDatas.GetField(key);
+                PropDatasConfig propdata = new PropDatasConfig(mJdata.GetField("targeName").str);
+                CPUParticleMaterialPropsConfigs.Add(key, propdata);
+                JSONObject textures = mJdata["textures"];
+                if (textures != null)
+                {
+                    int texureCount = textures.Count;
+                    for (int tindex = 0; tindex < texureCount; tindex++)
+                    {
+                        JSONObject texture = textures[tindex];
+                        string uName = texture.GetField("uName").str;
+                        string lName = texture.GetField("layaName").str;
+                        string defined = null;
+                        bool isNormal = false;
+                        if (texture.GetField("defind") != null)
+                            defined = texture.GetField("defind").str;
+                        if (texture.GetField("isNormal") != null)
+                            isNormal = texture.GetField("isNormal").b;
+                        propdata.addTextureProps(uName, lName, defined, isNormal);
+                    }
+                }
+                JSONObject colors = mJdata["colors"];
+                if (colors != null)
+                {
+                    int colorCount = colors.Count;
+                    for (int cindex = 0; cindex < colorCount; cindex++)
+                    {
+                        JSONObject color = colors[cindex];
+                        string uName = color.GetField("uName").str;
+                        string lName = color.GetField("layaName").str;
+                        if (color.GetField("hdrName") != null)
+                            propdata.addColorProps(uName, lName, color.GetField("hdrName").str);
+                        else
+                            propdata.addColorProps(uName, lName);
+                    }
+                }
+                JSONObject floatDatas = mJdata["floats"];
+                if (floatDatas != null)
+                {
+                    int floatCount = floatDatas.Count;
+                    for (int floatIndex = 0; floatIndex < floatCount; floatIndex++)
+                    {
+                        JSONObject floatData = floatDatas[floatIndex];
+                        string uName = floatData.GetField("uName").str;
+                        string lName = floatData.GetField("layaName").str;
+                        bool isGama = false;
+                        if (floatData.GetField("isgama") != null)
+                            isGama = floatData.GetField("isgama").b;
+                        string rule = null;
+                        if (floatData.GetField("rule") != null)
+                            rule = floatData.GetField("rule").str;
+                        propdata.addFloatProps(uName, lName, isGama, rule);
+                    }
+                }
+                JSONObject tillOffset = mJdata["tillOffset"];
+                if (tillOffset != null)
+                {
+                    int tillOffsetCount = tillOffset.Count;
+                    for (int tOffsetIndex = 0; tOffsetIndex < tillOffsetCount; tOffsetIndex++)
+                    {
+                        JSONObject tOffsetData = tillOffset[tOffsetIndex];
+                        string uName = tOffsetData.GetField("uName").str;
+                        string lName = tOffsetData.GetField("layaName").str;
+                        propdata.addTillOffsetProps(uName, lName);
+                    }
+                }
+                JSONObject definedDatas = mJdata["defineds"];
+                if (definedDatas != null)
+                {
+                    int definedCount = definedDatas.Count;
+                    for (int defindIndex = 0; defindIndex < definedCount; defindIndex++)
+                    {
+                        JSONObject definedData = definedDatas[defindIndex];
+                        string uName = definedData.GetField("uName").str;
+                        string lName = definedData.GetField("layaName").str;
+                        DefindsFrom from = (DefindsFrom)definedData.GetField("from").n;
+                        if (definedData.GetField("deflat") != null)
+                            propdata.addDefineds(uName, lName, from, definedData.GetField("deflat").n);
+                        else
+                            propdata.addDefineds(uName, lName, from);
+                    }
+                }
+            }
+        }
+    }
 
+    /// <summary>
+    /// Get material config for CPU particle mode: override table first, fallback to main table.
+    /// </summary>
+    public static PropDatasConfig getCPUParticleConfig(string shaderName)
+    {
+        if (CPUParticleMaterialPropsConfigs != null && CPUParticleMaterialPropsConfigs.ContainsKey(shaderName))
+            return CPUParticleMaterialPropsConfigs[shaderName];
+        return getMetarialConfig(shaderName);
     }
 
     public static PropDatasConfig getMetarialConfig(string shaderName)
@@ -684,37 +789,47 @@ internal class MetarialUitls
             return false;
         }
     }
-    public static void WriteMetarial(Material material, JSONObject jsonData, ResoureMap resoureMap, MaterialFile materialFile = null)
+    public static void WriteMetarial(Material material, JSONObject jsonData, ResoureMap resoureMap, MaterialFile materialFile = null, bool isCPUParticle = false)
     {
         string shaderName = material.shader.name;
 
-        // 检查是否有内置配置
-        if (!MaterialPropsConfigs.ContainsKey(shaderName))
+        // CPU 粒子模式：优先使用 CPU 覆盖配置表
+        PropDatasConfig propsData = null;
+        if (isCPUParticle)
         {
-            // 优先走自定义Shader导出（包括粒子渲染器使用的自定义shader）
-            if (ExportConfig.EnableCustomShaderExport)
-            {
-                CustomShaderExporter.WriteAutoCustomShaderMaterial(material, jsonData, resoureMap, materialFile);
-                return;
-            }
-
-            // 未启用自定义Shader导出时，粒子渲染器材质回退到Laya内置粒子shader
-            if (materialFile != null && materialFile.IsUsedByParticleSystem())
-            {
-                ExportLogger.Warning($"Particle material '{material.name}' uses unregistered shader '{shaderName}', fallback to Laya particle shader. Enable 'Custom Shader Export' for better results.");
-                WriteParticleMaterialGeneric(material, jsonData, resoureMap);
-                return;
-            }
-
-            FileUtil.setStatuse(false);
-            Debug.LogErrorFormat(material, "LayaAir3D Warning : not get the shader config " + shaderName + ". Enable 'Custom Shader Export' to auto-export custom shaders.");
-            return;
+            propsData = getCPUParticleConfig(shaderName);
         }
-        
-        PropDatasConfig propsData = MaterialPropsConfigs[shaderName];
-        
-        // 粒子材质使用特殊的导出逻辑
-        if (propsData.materalName == "PARTICLESHURIKEN")
+
+        if (propsData == null)
+        {
+            // 检查是否有内置配置
+            if (!MaterialPropsConfigs.ContainsKey(shaderName))
+            {
+                // 优先走自定义Shader导出（包括粒子渲染器使用的自定义shader）
+                if (ExportConfig.EnableCustomShaderExport)
+                {
+                    CustomShaderExporter.WriteAutoCustomShaderMaterial(material, jsonData, resoureMap, materialFile);
+                    return;
+                }
+
+                // 未启用自定义Shader导出时，粒子渲染器材质回退到Laya内置粒子shader
+                if (materialFile != null && materialFile.IsUsedByParticleSystem())
+                {
+                    ExportLogger.Warning($"Particle material '{material.name}' uses unregistered shader '{shaderName}', fallback to Laya particle shader. Enable 'Custom Shader Export' for better results.");
+                    WriteParticleMaterialGeneric(material, jsonData, resoureMap);
+                    return;
+                }
+
+                FileUtil.setStatuse(false);
+                Debug.LogErrorFormat(material, "LayaAir3D Warning : not get the shader config " + shaderName + ". Enable 'Custom Shader Export' to auto-export custom shaders.");
+                return;
+            }
+
+            propsData = MaterialPropsConfigs[shaderName];
+        }
+
+        // 粒子材质使用特殊的导出逻辑（仅 GPU/Shuriken 模式）
+        if (!isCPUParticle && propsData.materalName == "PARTICLESHURIKEN")
         {
             WriteParticleMaterial(material, jsonData, resoureMap, propsData);
             return;

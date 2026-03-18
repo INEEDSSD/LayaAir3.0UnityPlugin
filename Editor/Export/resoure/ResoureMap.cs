@@ -112,7 +112,7 @@ internal class ResoureMap
         meshInstanceToPath[meshInstanceID] = customPath;
     }
 
-    public MaterialFile GetMaterialFile(Material material, Renderer renderer = null)
+    public MaterialFile GetMaterialFile(Material material, Renderer renderer = null, bool isCPUParticle = false)
     {
         if (material == null)
         {
@@ -121,9 +121,13 @@ internal class ResoureMap
         }
 
         string path = AssetsUtil.GetMaterialPath(material);
+        // CPU particle materials use a separate cache key to allow dual-mode export
+        if (isCPUParticle)
+            path = path + "#cpu";
+
         if (!this.HaveFileData(path))
         {
-            this.AddExportFile(new MaterialFile(this, material, renderer));
+            this.AddExportFile(new MaterialFile(this, material, renderer, isCPUParticle));
         }
         else
         {
@@ -1027,13 +1031,13 @@ internal class ResoureMap
         }
     }
 
-    public JSONObject GetMaterialData(Material material, Renderer renderer = null)
+    public JSONObject GetMaterialData(Material material, Renderer renderer = null, bool isCPUParticle = false)
     {
         JSONObject materFiledata = new JSONObject(JSONObject.Type.OBJECT);
         materFiledata.AddField("_$type", "Material");
         if (material != null)
         {
-            MaterialFile jsonFile = this.GetMaterialFile(material, renderer);
+            MaterialFile jsonFile = this.GetMaterialFile(material, renderer, isCPUParticle);
             if (jsonFile != null)
             {
                 materFiledata.AddField("_$uuid", jsonFile.uuid);

@@ -8,13 +8,15 @@ internal class MaterialFile : JsonFile
 {
     private Material m_material;
     private bool m_isBuiltinParticleMaterial = false;
+    private bool m_isCPUParticle = false;
     private HashSet<System.Type> m_rendererTypes = new HashSet<System.Type>();
     private bool m_isParticleMeshMode = false; // ⭐ Track if particle uses mesh rendering mode
 
-    public MaterialFile(ResoureMap map, Material material, Renderer renderer = null) : base(null,new JSONObject(JSONObject.Type.OBJECT))
+    public MaterialFile(ResoureMap map, Material material, Renderer renderer = null, bool isCPUParticle = false) : base(null,new JSONObject(JSONObject.Type.OBJECT))
     {
         this.resoureMap = map;
         this.m_material = material;
+        this.m_isCPUParticle = isCPUParticle;
 
         // Track which type of renderer uses this material
         if (renderer != null)
@@ -33,17 +35,23 @@ internal class MaterialFile : JsonFile
                 }
             }
         }
-        
+
         // 检查是否是内置粒子材质
         string materialPath = AssetDatabase.GetAssetPath(material.GetInstanceID());
         bool isBuiltinResource = ResoureMap.IsBuiltinResource(materialPath);
         bool isParticleMaterial = IsParticleShader(material.shader.name);
         bool isUsedByParticle = renderer is ParticleSystemRenderer;
 
-        // 内置资源 + (粒子shader 或 粒子渲染器使用) → 导出为Laya粒子材质
-        if (isBuiltinResource && (isParticleMaterial || isUsedByParticle))
+        // CPU 粒子模式：使用独立路径和 CPU 覆盖配置表
+        if (isCPUParticle)
         {
-            // 内置粒子材质使用模板
+            string cpuPath = AssetsUtil.GetMaterialPath(material) + "#cpu";
+            this.updatePath(cpuPath);
+            MetarialUitls.WriteMetarial(material, this.jsonData, map, this, true);
+        }
+        // 内置资源 + (粒子shader 或 粒子渲染器使用) → 导出为Laya Shuriken粒子材质
+        else if (isBuiltinResource && (isParticleMaterial || isUsedByParticle))
+        {
             m_isBuiltinParticleMaterial = true;
             this.updatePath(AssetsUtil.GetMaterialPath(material));
             WriteBuiltinParticleMaterial(material, this.jsonData, map);
@@ -265,10 +273,17 @@ internal class MaterialFile : JsonFile
         {
             return "default_material.lmat";
         }
+        // Remove #cpu cache suffix before generating output path
+        string cleanPath = path;
+        if (cleanPath.EndsWith("#cpu"))
+        {
+            cleanPath = cleanPath.Substring(0, cleanPath.Length - 4);
+        }
         // 修复：安全地获取不带扩展名的路径
-        int dotIndex = path.LastIndexOf('.');
-        string basePath = dotIndex >= 0 ? path.Substring(0, dotIndex) : path;
-        return GameObjectUitls.cleanIllegalChar(basePath, false) + ".lmat";
+        int dotIndex = cleanPath.LastIndexOf('.');
+        string basePath = dotIndex >= 0 ? cleanPath.Substring(0, dotIndex) : cleanPath;
+        string suffix = m_isCPUParticle ? "_cpu" : "";
+        return GameObjectUitls.cleanIllegalChar(basePath, false) + suffix + ".lmat";
     }
 
     public override void SaveFile(Dictionary<string, FileData> exportFiles)
