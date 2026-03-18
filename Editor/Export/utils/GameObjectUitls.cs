@@ -895,6 +895,13 @@ class GameObjectUitls
             // on the same renderer don't collapse into the same group.
             if (typeof(Renderer).IsAssignableFrom(editorCurveBindings[j].type))
             {
+                // Skip SpriteRenderer m_Color — not a material property,
+                // handled by writeClip2D as 2D Animator2D instead
+                if (editorCurveBindings[j].type == typeof(SpriteRenderer)
+                    && curveData.propertyName.StartsWith("m_Color"))
+                {
+                    continue;
+                }
                 string matPath = GetMaterialAnimationGroupPath(curveData.path, curveData.propertyName);
                 if (matPath != null) path = matPath;
             }
@@ -963,6 +970,12 @@ class GameObjectUitls
                 {
                     // Handle Camera properties (all properties directly on Camera node)
                     curveGroup = readCameraAnimation(binding, child, targetObject, curveData.path, curveData.propertyName);
+                }
+                else if (binding.type == typeof(SpriteRenderer)
+                         && curveData.propertyName.StartsWith("m_Color"))
+                {
+                    // SpriteRenderer m_Color curves are handled by writeClip2D — skip in 3D animation
+                    continue;
                 }
                 else if (typeof(Renderer).IsAssignableFrom(binding.type))
                 {
@@ -1187,7 +1200,7 @@ class GameObjectUitls
 
         Util.FileUtil.WriteData(fs, (UInt16)stringDatas.IndexOf(clipName));//动画名字符索引
 
-        float aniTotalTime = startTimeList.Count == 0 ? 0.0f : (float)startTimeList[startTimeList.Count - 1];
+        float aniTotalTime = aniclip.length;
         Util.FileUtil.WriteData(fs, aniTotalTime);///动画总时长
         if (aniclip.wrapMode == UnityEngine.WrapMode.Loop)
         {
@@ -1313,6 +1326,259 @@ class GameObjectUitls
         Util.FileUtil.WriteData(fs, (UInt32)(StringDatasAreaPosition_Start - ContentAreaPosition_Start));//UInt32 blockLength
 
         //倒推数据信息区
+        fs.Position = MarkContentAreaPosition_Start;
+        Util.FileUtil.WriteData(fs, (UInt32)StringDatasAreaPosition_Start);
+        Util.FileUtil.WriteData(fs, (UInt32)(StringDatasAreaPosition_End - StringDatasAreaPosition_Start));
+
+        fs.Close();
+    }
+
+    /// <summary>
+    /// Write a 2D animation clip (.mc) in LAYAANIMATION2D:01 binary format.
+    /// Extracts SpriteRenderer m_Color curves and maps them to Mesh2DRender color r/g/b/a properties
+    /// using 3-segment property paths: ["Mesh2DRender", "color", "r"].
+    /// Compatible with AnimationClip2DParse01.READ_ANIMATIONS2D() on the engine side.
+    /// </summary>
+    /// <param name="targetPath">binding.path filter — only extract curves matching this path (empty = root object)</param>
+    public static void writeClip2D(AnimationClip aniclip, FileStream fs, GameObject gameObject, string targetPath = "")
+    {
+        // Extract SpriteRenderer m_Color curves matching targetPath
+        EditorCurveBinding[] bindings = AnimationUtility.GetCurveBindings(aniclip);
+        AnimationCurve curveR = null, curveG = null, curveB = null, curveA = null;
+
+        foreach (EditorCurveBinding binding in bindings)
+        {
+            if (binding.type != typeof(SpriteRenderer)) continue;
+            if (binding.path != targetPath) continue; // Match specified target path
+
+            AnimationCurve curve = AnimationUtility.GetEditorCurve(aniclip, binding);
+            if (binding.propertyName == "m_Color.r") curveR = curve;
+            else if (binding.propertyName == "m_Color.g") curveG = curve;
+            else if (binding.propertyName == "m_Color.b") curveB = curve;
+            else if (binding.propertyName == "m_Color.a") curveA = curve;
+        }
+
+        // Build list of non-null curves with their color component name (3rd segment)
+        var curveEntries = new List<KeyValuePair<string, AnimationCurve>>();
+        if (curveR != null) curveEntries.Add(new KeyValuePair<string, AnimationCurve>("r", curveR));
+        if (curveG != null) curveEntries.Add(new KeyValuePair<string, AnimationCurve>("g", curveG));
+        if (curveB != null) curveEntries.Add(new KeyValuePair<string, AnimationCurve>("b", curveB));
+        if (curveA != null) curveEntries.Add(new KeyValuePair<string, AnimationCurve>("a", curveA));
+
+        if (curveEntries.Count == 0)
+        {
+            fs.Close();
+            return;
+        }
+
+        // Pad curves: if last keyframe ends before clip duration, add a hold keyframe at clip end
+        // This ensures the 2D clip spans the full duration (matching the 3D clip) for correct loop sync
+        float clipLength = aniclip.length;
+        for (int ci = 0; ci < curveEntries.Count; ci++)
+        {
+            AnimationCurve curve = curveEntries[ci].Value;
+            Keyframe[] keys = curve.keys;
+            if (keys.Length > 0 && keys[keys.Length - 1].time < clipLength - 0.001f)
+            {
+                Keyframe lastKey = keys[keys.Length - 1];
+                Keyframe padKey = new Keyframe(clipLength, lastKey.value, 0f, 0f);
+                padKey.weightedMode = lastKey.weightedMode;
+                curve.AddKey(padKey);
+                // Rebuild entry with modified curve
+                curveEntries[ci] = new KeyValuePair<string, AnimationCurve>(curveEntries[ci].Key, curve);
+            }
+        }
+
+        // Build string pool: 3-segment paths ["Mesh2DRender", "color", "r/g/b/a"]
+        List<string> stringDatas = new List<string>();
+        stringDatas.Add("ANIMATIONS2D");
+        stringDatas.Add("Mesh2DRender");
+        if (!stringDatas.Contains("color")) stringDatas.Add("color");
+        foreach (var entry in curveEntries)
+        {
+            if (!stringDatas.Contains(entry.Key)) stringDatas.Add(entry.Key);
+        }
+
+        // Collect all unique float values into numList (float pool)
+        List<float> numList = new List<float>();
+        Dictionary<int, int> numMap = new Dictionary<int, int>(); // bitwise int key for exact float matching
+
+        System.Func<float, int> addNum = (float val) =>
+        {
+            if (float.IsPositiveInfinity(val)) val = float.MaxValue;
+            else if (float.IsNegativeInfinity(val)) val = float.MinValue;
+            else if (float.IsNaN(val)) val = 0f;
+
+            int bits = System.BitConverter.ToInt32(System.BitConverter.GetBytes(val), 0);
+            if (!numMap.ContainsKey(bits))
+            {
+                numMap[bits] = numList.Count;
+                numList.Add(val);
+            }
+            return numMap[bits];
+        };
+
+        System.Func<float, int> getNumIndex = (float val) =>
+        {
+            if (float.IsPositiveInfinity(val)) val = float.MaxValue;
+            else if (float.IsNegativeInfinity(val)) val = float.MinValue;
+            else if (float.IsNaN(val)) val = 0f;
+
+            int bits = System.BitConverter.ToInt32(System.BitConverter.GetBytes(val), 0);
+            return numMap[bits];
+        };
+
+        // Add duration
+        float duration = aniclip.length;
+        addNum(duration);
+
+        // Pre-collect all keyframe values into numList
+        foreach (var entry in curveEntries)
+        {
+            foreach (Keyframe kf in entry.Value.keys)
+            {
+                addNum(kf.time);
+                addNum(kf.value);
+                addNum(kf.inTangent);
+                addNum(kf.outTangent);
+            }
+        }
+
+        int clipFrameRate = Mathf.RoundToInt(aniclip.frameRate);
+        if (clipFrameRate <= 0) clipFrameRate = 30;
+
+        // Position markers for backfilling
+        long MarkContentAreaPosition_Start = 0;
+        long BlockAreaPosition_Start = 0;
+        long StringAreaPosition_Start = 0;
+        long ContentAreaPosition_Start = 0;
+        long StringDatasAreaPosition_Start = 0;
+        long StringDatasAreaPosition_End = 0;
+
+        // Version string
+        Util.FileUtil.WriteData(fs, "LAYAANIMATION2D:01");
+
+        // DATA section: offset + size (backfilled later)
+        MarkContentAreaPosition_Start = fs.Position;
+        Util.FileUtil.WriteData(fs, (UInt32)0); // offset
+        Util.FileUtil.WriteData(fs, (UInt32)0); // size
+
+        // BLOCK section
+        BlockAreaPosition_Start = fs.Position;
+        Util.FileUtil.WriteData(fs, (UInt16)1); // block count
+        Util.FileUtil.WriteData(fs, (UInt32)0); // block start (backfilled)
+        Util.FileUtil.WriteData(fs, (UInt32)0); // block length (backfilled)
+
+        // STRINGS section header
+        StringAreaPosition_Start = fs.Position;
+        Util.FileUtil.WriteData(fs, (UInt32)0); // offset (backfilled)
+        Util.FileUtil.WriteData(fs, (UInt16)0); // count (backfilled)
+
+        // Content area
+        ContentAreaPosition_Start = fs.Position;
+
+        // Block name index ("ANIMATIONS2D")
+        Util.FileUtil.WriteData(fs, (UInt16)stringDatas.IndexOf("ANIMATIONS2D"));
+
+        // numList
+        Util.FileUtil.WriteData(fs, (UInt16)numList.Count);
+        for (int i = 0; i < numList.Count; i++)
+        {
+            Util.FileUtil.WriteData(fs, numList[i]);
+        }
+
+        // duration (index into numList)
+        Util.FileUtil.WriteData(fs, (Int16)getNumIndex(duration));
+
+        // isLooping
+        bool isLooping = aniclip.isLooping || aniclip.wrapMode == UnityEngine.WrapMode.Loop;
+        Util.FileUtil.WriteData(fs, isLooping);
+
+        // frameRate
+        Util.FileUtil.WriteData(fs, (Int16)clipFrameRate);
+
+        // nodeCount
+        Util.FileUtil.WriteData(fs, (Int16)curveEntries.Count);
+
+        // Per node
+        foreach (var entry in curveEntries)
+        {
+            string propName = entry.Key;
+            AnimationCurve curve = entry.Value;
+
+            // ownerPath: 0 entries (target is the prefab root itself)
+            Util.FileUtil.WriteData(fs, (UInt16)0);
+
+            // propertyLength: 3 entries ["Mesh2DRender", "color", "r/g/b/a"]
+            Util.FileUtil.WriteData(fs, (UInt16)3);
+            Util.FileUtil.WriteData(fs, (UInt16)stringDatas.IndexOf("Mesh2DRender"));
+            Util.FileUtil.WriteData(fs, (UInt16)stringDatas.IndexOf("color"));
+            Util.FileUtil.WriteData(fs, (UInt16)stringDatas.IndexOf(propName));
+
+            // keyframeCount
+            Keyframe[] keys = curve.keys;
+            Util.FileUtil.WriteData(fs, (UInt16)keys.Length);
+
+            foreach (Keyframe kf in keys)
+            {
+                // time (numList index)
+                Util.FileUtil.WriteData(fs, (UInt16)getNumIndex(kf.time));
+
+                // hasTweenType: 0 (no tween type string)
+                Util.FileUtil.WriteData(fs, (Byte)0);
+
+                // hasTweenInfo: 1 (we have tangent info)
+                Util.FileUtil.WriteData(fs, (Byte)1);
+
+                // inTangent, outTangent (sanitized)
+                float inT = kf.inTangent;
+                float outT = kf.outTangent;
+                if (float.IsPositiveInfinity(inT)) inT = float.MaxValue;
+                else if (float.IsNegativeInfinity(inT)) inT = float.MinValue;
+                else if (float.IsNaN(inT)) inT = 0f;
+                if (float.IsPositiveInfinity(outT)) outT = float.MaxValue;
+                else if (float.IsNegativeInfinity(outT)) outT = float.MinValue;
+                else if (float.IsNaN(outT)) outT = 0f;
+
+                Util.FileUtil.WriteData(fs, (UInt16)getNumIndex(inT));
+                Util.FileUtil.WriteData(fs, (UInt16)getNumIndex(outT));
+
+                // hasInWeight: 0
+                Util.FileUtil.WriteData(fs, (Byte)0);
+                // hasOutWeight: 0
+                Util.FileUtil.WriteData(fs, (Byte)0);
+
+                // valueType: 0 (number)
+                Util.FileUtil.WriteData(fs, (Byte)0);
+                // value (numList index)
+                Util.FileUtil.WriteData(fs, (UInt16)getNumIndex(kf.value));
+
+                // hasExtend: 0
+                Util.FileUtil.WriteData(fs, (Byte)0);
+            }
+        }
+
+        // events: 0
+        Util.FileUtil.WriteData(fs, (UInt16)0);
+
+        // String data area
+        StringDatasAreaPosition_Start = fs.Position;
+        for (int i = 0; i < stringDatas.Count; i++)
+        {
+            Util.FileUtil.WriteData(fs, stringDatas[i]);
+        }
+        StringDatasAreaPosition_End = fs.Position;
+
+        // Backfill STRINGS header (leave offset as 0 — READ_STRINGS adds offset + DATA.offset)
+        fs.Position = StringAreaPosition_Start + 4; // skip offset field (stays 0)
+        Util.FileUtil.WriteData(fs, (UInt16)stringDatas.Count);
+
+        // Backfill BLOCK
+        fs.Position = BlockAreaPosition_Start + 2; // skip block count
+        Util.FileUtil.WriteData(fs, (UInt32)0); // block start (relative to content area = 0)
+        Util.FileUtil.WriteData(fs, (UInt32)(StringDatasAreaPosition_Start - ContentAreaPosition_Start));
+
+        // Backfill DATA
         fs.Position = MarkContentAreaPosition_Start;
         Util.FileUtil.WriteData(fs, (UInt32)StringDatasAreaPosition_Start);
         Util.FileUtil.WriteData(fs, (UInt32)(StringDatasAreaPosition_End - StringDatasAreaPosition_Start));

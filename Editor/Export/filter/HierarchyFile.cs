@@ -17,6 +17,9 @@ internal class HierarchyFile
         GameObject[] gameObjects = scene.GetRootGameObjects();
         var allNodes = getSceneAllNode(gameObjects);//场景中所有GameObject
         this.resouremap = new ResoureMap();
+        // Set scene directory for UI2D prefab output path (_ui2d_prefabs/)
+        string sceneLsPath = scene.path.Replace(System.IO.Path.GetExtension(scene.path), ".ls");
+        this.resouremap.SetSceneDir(System.IO.Path.GetDirectoryName(sceneLsPath).Replace("\\", "/"));
         this.nodeMap = this.resouremap.AddNodeMap(2, sceneMode: true);
        
         foreach (var gameObject in allNodes)//遍历
@@ -63,13 +66,13 @@ internal class HierarchyFile
         else
         {
             GameObject[] gameObjects = scene.GetRootGameObjects();
-            
+
             // 检查是否启用批量导出一级节点
             if (ExportConfig.BatchMade)
             {
                 // 用于跟踪已使用的文件名，处理同名节点
                 Dictionary<string, int> usedFileNames = new Dictionary<string, int>();
-                
+
                 // 批量导出一级节点：将每个根节点的一级子节点分别导出为独立的 .lh 文件
                 for (int i = 0; i < gameObjects.Length; i++)
                 {
@@ -78,7 +81,7 @@ internal class HierarchyFile
                     {
                         continue;
                     }
-                    
+
                     // 遍历根节点的一级子节点
                     Transform rootTransform = rootObject.transform;
                     for (int j = 0; j < rootTransform.childCount; j++)
@@ -88,7 +91,7 @@ internal class HierarchyFile
                         {
                             continue;
                         }
-                        
+
                         // 生成唯一的文件名，处理同名节点
                         string baseName = GameObjectUitls.cleanIllegalChar(childObject.name, true);
                         string fileName;
@@ -102,8 +105,10 @@ internal class HierarchyFile
                             usedFileNames[baseName] = 0;
                             fileName = baseName + ".lh";
                         }
-                        
-                        this.resouremap.AddExportFile(new JsonFile(fileName, this.nodeMap.getPerfabJson(childObject)));
+
+                        JSONObject perfabJson = this.nodeMap.getPerfabJson(childObject);
+                        addAtlasPreloads(perfabJson);
+                        this.resouremap.AddExportFile(new JsonFile(fileName, perfabJson));
                     }
                 }
             }
@@ -117,12 +122,34 @@ internal class HierarchyFile
                     {
                         continue;
                     }
-                    this.resouremap.AddExportFile(new JsonFile(gameObject.name + ".lh", this.nodeMap.getPerfabJson(gameObject)));
+                    JSONObject perfabJson = this.nodeMap.getPerfabJson(gameObject);
+                    addAtlasPreloads(perfabJson);
+                    this.resouremap.AddExportFile(new JsonFile(gameObject.name + ".lh", perfabJson));
                 }
             }
         }
-        
+
         this.resouremap.SaveAllFile();
+    }
+
+    /// <summary>
+    /// Add atlas _$preloads to a root JSON node (scene or prefab) so that
+    /// atlas files are loaded before any sub-texture references are resolved.
+    /// </summary>
+    private void addAtlasPreloads(JSONObject rootNode)
+    {
+        List<string> atlasUUIDs = this.resouremap.GetAtlasFileUUIDs();
+        if (atlasUUIDs.Count == 0) return;
+
+        JSONObject preloads = new JSONObject(JSONObject.Type.ARRAY);
+        JSONObject preloadTypes = new JSONObject(JSONObject.Type.ARRAY);
+        foreach (string atlasUUID in atlasUUIDs)
+        {
+            preloads.Add(atlasUUID);
+            preloadTypes.Add("Atlas");
+        }
+        rootNode.AddField("_$preloads", preloads);
+        rootNode.AddField("_$preloadTypes", preloadTypes);
     }
 
     private void getSceneNode() {
@@ -136,6 +163,9 @@ internal class HierarchyFile
         node.AddField("top", 0);
         node.AddField("bottom", 0);
         node.AddField("name", "Scene2D");
+
+        addAtlasPreloads(node);
+
         JSONObject fchild = new JSONObject(JSONObject.Type.ARRAY);
         node.AddField("_$child", fchild);
         JSONObject scene3dNode = new JSONObject(JSONObject.Type.OBJECT);

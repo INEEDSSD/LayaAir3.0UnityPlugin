@@ -507,7 +507,7 @@ public class JSONObject {
 		}
 		AddField(name, obj);
 	}
-    private void RemoveField(string name) {
+    public void RemoveField(string name) {
 		if(keys.IndexOf(name) > -1) {
 			list.RemoveAt(keys.IndexOf(name));
 			keys.Remove(name);

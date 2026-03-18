@@ -12,12 +12,30 @@ internal class ResoureMap
     private List<NodeMap> nodemaps;
     // Mesh实例ID到路径的映射表（用于简化后的粒子mesh）
     private Dictionary<int, string> meshInstanceToPath;
+    // SpriteRenderer color 动画目标映射：子对象 → (AnimatorController, binding.path, Animator所在GO)
+    private Dictionary<GameObject, SpriteColorAnimTarget> m_spriteColorAnimTargets = new Dictionary<GameObject, SpriteColorAnimTarget>();
+    // 场景文件所在目录（用于 UI2D prefab 输出路径）
+    private string m_sceneDir = "";
+    // Animator2DSync runtime script file (lazy, one per export)
+    private RuntimeScriptFile m_syncScriptFile;
+
+    private struct SpriteColorAnimTarget
+    {
+        public AnimatorController controller;
+        public string targetPath;
+        public GameObject animatorGameObject;
+    }
 
     public ResoureMap()
     {
         this.exportFiles = new Dictionary<string, FileData>();
         this.nodemaps = new List<NodeMap>();
         this.meshInstanceToPath = new Dictionary<int, string>();
+    }
+
+    public void SetSceneDir(string sceneDir)
+    {
+        m_sceneDir = sceneDir;
     }
 
     public PerfabFile getPerfabFile(string path)
@@ -277,6 +295,21 @@ internal class ResoureMap
         }
     }
 
+    /// <summary>
+    /// Collect all atlas UUIDs from exported SpriteAtlasExportFile instances.
+    /// Used to populate _$preloads in the scene root so atlases load before prefabs.
+    /// </summary>
+    public List<string> GetAtlasFileUUIDs()
+    {
+        List<string> uuids = new List<string>();
+        foreach (var kv in exportFiles)
+        {
+            if (kv.Value is SpriteAtlasExportFile)
+                uuids.Add(kv.Value.uuid);
+        }
+        return uuids;
+    }
+
     public void SaveAllFile()
     {
         // Use a snapshot loop: SaveFile() for AnimationClipFile may call GetMaterialFile()
@@ -329,6 +362,8 @@ internal class ResoureMap
         }
         else
         {
+            // SpriteRenderer nodes use UI3D path: stay as Sprite3D with 3D transform,
+            // UI3D component in _$comp handles the 2D rendering.
             node.AddField("_$type", "Sprite3D");
         }
 
@@ -368,7 +403,22 @@ internal class ResoureMap
         }
         else if(comp is Animator)
         {
-            compents.Add(this.GetAnimatorComponentData(comp as Animator, isOverride));
+            Animator anim = comp as Animator;
+            // Skip 3D Animator if it only has SpriteRenderer color animation
+            // (handled by 2D Animator2D in SpriteRenderer export path)
+            bool hasNonColorAnims = !IsSpriteRendererColorOnlyAnimator(anim);
+            // Collect child SpriteRenderer color animation targets for Animator2D export
+            // (must run before GetAnimatorComponentData so we know if sync script is needed)
+            int prevTargetCount = m_spriteColorAnimTargets.Count;
+            CollectSpriteColorAnimTargets(anim);
+            bool hasChildColorAnims = m_spriteColorAnimTargets.Count > prevTargetCount;
+
+            if (hasNonColorAnims)
+            {
+                // If both 3D and 2D animations exist, pass sync script UUID to controller export
+                string syncScriptUuid = (hasChildColorAnims) ? EnsureAnimator2DSyncScript() : null;
+                compents.Add(this.GetAnimatorComponentData(anim, isOverride, syncScriptUuid));
+            }
         }else if (comp is ReflectionProbe)
         {
             compents.Add(this.GetReflectionProbe(comp as ReflectionProbe, isOverride));
@@ -754,6 +804,9 @@ internal class ResoureMap
         string       spriteName     = sprite.name;
         SpriteDrawMode drawMode     = spriteRenderer.drawMode;
         Vector2      rendererSize   = spriteRenderer.size;
+        Color        spriteColor    = spriteRenderer.color;
+        int          texFullWidth   = spriteTexture.width;
+        int          texFullHeight  = spriteTexture.height;
 
         if (spriteTexture == null)
         {
@@ -787,11 +840,118 @@ internal class ResoureMap
         // 创建或获取 2D Image 预制体文件（使用缓存的纹理和名称）
         string texturePath     = AssetsUtil.GetTextureFile(spriteTexture);
         string spritePrefabKey = GetSpritePrefabVirtualPath(texturePath, spriteName);
+
+        // Check for color animation on this SpriteRenderer — export as Animator2D with full state machine
+        // Source 1: Animator on the same GameObject (binding.path == "")
+        // Source 2: Ancestor Animator targeting this child (binding.path != "", collected in m_spriteColorAnimTargets)
+        JSONObject animationData = null;
+        AnimatorController ac = null;
+        string colorTargetPath = "";
+        GameObject animatorGO = spriteRenderer.gameObject;
+
+        // Check same-GO Animator first
+        Animator animator = spriteRenderer.GetComponent<Animator>();
+        if (animator != null)
+        {
+            ac = animator.runtimeAnimatorController as AnimatorController;
+            colorTargetPath = "";
+            animatorGO = spriteRenderer.gameObject;
+        }
+        // Check pre-collected sub-object targets from ancestor Animators
+        if (ac == null && m_spriteColorAnimTargets.ContainsKey(spriteRenderer.gameObject))
+        {
+            var target = m_spriteColorAnimTargets[spriteRenderer.gameObject];
+            ac = target.controller;
+            colorTargetPath = target.targetPath;
+            animatorGO = target.animatorGameObject;
+        }
+
+        if (ac != null)
+        {
+            if (!AnimatorController2DFile.HasAnySpriteColorCurves(ac, colorTargetPath))
+            {
+                Debug.Log($"[LayaAir Export 2D] '{spriteRenderer.gameObject.name}': AnimatorController '{ac.name}' has no SpriteRenderer m_Color curves for path '{colorTargetPath}'");
+            }
+            else
+            {
+                // Build .mcc path alongside the sprite prefab .lh
+                string mccPath = GetSpritePrefabVirtualPath(texturePath, spriteName)
+                    .Replace(".lh", ".mcc");
+
+                if (!this.HaveFileData(mccPath))
+                {
+                    this.AddExportFile(new AnimatorController2DFile(mccPath, ac,
+                        animatorGO, this, colorTargetPath));
+                }
+                AnimatorController2DFile ctrlFile = this.GetFileData(mccPath) as AnimatorController2DFile;
+
+                if (ctrlFile != null)
+                {
+                    animationData = new JSONObject(JSONObject.Type.OBJECT);
+                    animationData.AddField("_$type", "Animator2D");
+                    JSONObject ctrlRef = new JSONObject(JSONObject.Type.OBJECT);
+                    ctrlRef.AddField("_$uuid", ctrlFile.uuid);
+                    ctrlRef.AddField("_$type", "AnimatorController2D");
+                    animationData.AddField("controller", ctrlRef);
+                    Debug.Log($"[LayaAir Export 2D] '{spriteRenderer.gameObject.name}': Animator2D exported, controller UUID={ctrlFile.uuid}, mccPath={mccPath}, targetPath='{colorTargetPath}'");
+                }
+            }
+        }
+        else
+        {
+            Debug.Log($"[LayaAir Export 2D] '{spriteRenderer.gameObject.name}': No color animation source found");
+        }
+
+        // Detect whether the sprite is a sub-region of its texture (spritesheet/atlas case).
+        // If so, export a .atlas file and use sub-texture URL; otherwise use texture UUID directly.
+        bool isSubRegion = !(Mathf.Approximately(spriteRect.x, 0f) && Mathf.Approximately(spriteRect.y, 0f)
+                           && Mathf.Approximately(spriteRect.width, texFullWidth)
+                           && Mathf.Approximately(spriteRect.height, texFullHeight));
+
+        // Generate or retrieve the default baseRender2D material for Mesh2DRender
+        string defaultMatPath = "Assets/Mesh2DRender_DefaultMaterial.lmat";
+        if (!this.HaveFileData(defaultMatPath))
+        {
+            this.AddExportFile(new Mesh2DDefaultMaterialFile());
+        }
+        Mesh2DDefaultMaterialFile matFile = this.GetFileData(defaultMatPath) as Mesh2DDefaultMaterialFile;
+        string materialUUID = matFile != null ? matFile.uuid : null;
+
         if (!this.HaveFileData(spritePrefabKey))
         {
-            this.AddExportFile(new UI2DPrefabFile(spritePrefabKey, textureFile,
-                                                  spriteName, pixelWidth, pixelHeight,
-                                                  materialFile));
+            if (isSubRegion)
+            {
+                // Atlas/spritesheet: create or reuse a SpriteAtlasExportFile for this texture
+                SpriteAtlasExportFile atlasFile = GetOrCreateSpriteAtlas(texturePath, textureFile, texFullHeight);
+                atlasFile.AddFrame(spriteName, spriteRect, texFullHeight,
+                                   new Vector2Int(pixelWidth, pixelHeight), Vector2Int.zero);
+
+                string subTextureRef = atlasFile.GetSubTextureRef(spriteName);
+                this.AddExportFile(new UI2DPrefabFile(spritePrefabKey, subTextureRef,
+                                                      atlasFile.uuid,
+                                                      spriteName, pixelWidth, pixelHeight,
+                                                      spriteColor, materialUUID, animationData));
+
+                // Ensure a FileConfigFile exists so AtlasInfoManager can find the sub-textures
+                EnsureFileConfigFile();
+            }
+            else
+            {
+                // Full texture: use texture UUID directly
+                this.AddExportFile(new UI2DPrefabFile(spritePrefabKey, textureFile,
+                                                      spriteName, pixelWidth, pixelHeight,
+                                                      spriteColor, materialUUID, animationData));
+            }
+        }
+        else if (isSubRegion)
+        {
+            // Prefab already exists, but make sure the atlas frame is registered
+            SpriteAtlasExportFile atlasFile = GetOrCreateSpriteAtlas(texturePath, textureFile, texFullHeight);
+            if (!atlasFile.HasFrame(spriteName))
+            {
+                atlasFile.AddFrame(spriteName, spriteRect, texFullHeight,
+                                   new Vector2Int(pixelWidth, pixelHeight), Vector2Int.zero);
+            }
         }
         UI2DPrefabFile ui2DPrefab = this.GetFileData(spritePrefabKey) as UI2DPrefabFile;
 
@@ -841,15 +1001,161 @@ internal class ResoureMap
         return compData;
     }
 
-    private static string GetSpritePrefabVirtualPath(string texturePath, string spriteName)
+    /// <summary>
+    /// Ensure the Animator2DSync runtime script is registered for export.
+    /// Returns the script's UUID for use in component JSON (_$type).
+    /// </summary>
+    private string EnsureAnimator2DSyncScript()
     {
-        int dotIndex = texturePath.LastIndexOf('.');
-        string basePath = dotIndex >= 0 ? texturePath.Substring(0, dotIndex) : texturePath;
-        string cleanName = GameObjectUitls.cleanIllegalChar(spriteName, true);
-        return basePath + "_" + cleanName + "_sprite.lh";
+        if (m_syncScriptFile == null)
+        {
+            m_syncScriptFile = new RuntimeScriptFile("Animator2DSync.ts");
+            AddExportFile(m_syncScriptFile);
+        }
+        return m_syncScriptFile.uuid;
     }
 
-    public JSONObject GetAnimatorComponentData(Animator animator, bool isOverride)
+    private string GetSpritePrefabVirtualPath(string texturePath, string spriteName)
+    {
+        string texName = System.IO.Path.GetFileNameWithoutExtension(texturePath);
+        string cleanName = GameObjectUitls.cleanIllegalChar(spriteName, true);
+        string dir = string.IsNullOrEmpty(m_sceneDir) ? "_ui2d_prefabs" : m_sceneDir + "/_ui2d_prefabs";
+        return dir + "/" + texName + "_" + cleanName + "_sprite.lh";
+    }
+
+    /// <summary>
+    /// Get or create a SpriteAtlasExportFile for the given texture.
+    /// All sprites from the same texture share one .atlas file.
+    /// </summary>
+    /// <param name="texturePath">Unity asset path of the texture (e.g. "Assets/Textures/mySheet.png")</param>
+    /// <param name="textureFile">The exported TextureFile for this texture</param>
+    /// <param name="texFullHeight">Full texture height (for Y-flip in AddFrame)</param>
+    private SpriteAtlasExportFile GetOrCreateSpriteAtlas(string texturePath, TextureFile textureFile, int texFullHeight)
+    {
+        // Atlas path: replace texture extension with .atlas
+        int dotIndex = texturePath.LastIndexOf('.');
+        string basePath = dotIndex >= 0 ? texturePath.Substring(0, dotIndex) : texturePath;
+        string atlasPath = basePath + ".atlas";
+
+        if (!this.HaveFileData(atlasPath))
+        {
+            // Texture output filename: the TextureFile may change extension (e.g. .png -> .jpg)
+            string textureFileName = System.IO.Path.GetFileName(textureFile.outPath);
+            SpriteAtlasExportFile atlasFile = new SpriteAtlasExportFile(atlasPath, textureFileName);
+            this.AddExportFile(atlasFile);
+
+            // 补全图集：加载该纹理上的所有 Sprite 子区域，而不仅仅是场景中引用到的
+            Object[] allAssets = AssetDatabase.LoadAllAssetsAtPath(texturePath);
+            foreach (Object asset in allAssets)
+            {
+                Sprite sp = asset as Sprite;
+                if (sp == null) continue;
+                // 跳过占据整张纹理的 Sprite（不属于子区域）
+                Rect spRect = sp.rect;
+                if (Mathf.Approximately(spRect.x, 0f) && Mathf.Approximately(spRect.y, 0f)
+                    && Mathf.Approximately(spRect.width, sp.texture.width)
+                    && Mathf.Approximately(spRect.height, sp.texture.height))
+                    continue;
+                if (!atlasFile.HasFrame(sp.name))
+                {
+                    int pw = Mathf.RoundToInt(spRect.width);
+                    int ph = Mathf.RoundToInt(spRect.height);
+                    if (pw < 1) pw = 1;
+                    if (ph < 1) ph = 1;
+                    atlasFile.AddFrame(sp.name, spRect, texFullHeight,
+                                       new Vector2Int(pw, ph), Vector2Int.zero);
+                }
+            }
+        }
+
+        return this.GetFileData(atlasPath) as SpriteAtlasExportFile;
+    }
+
+    /// <summary>
+    /// Ensure a FileConfigFile is registered in the export files.
+    /// Called when at least one atlas is created, so fileconfig.json will be generated.
+    /// </summary>
+    private void EnsureFileConfigFile()
+    {
+        string fileConfigPath = "fileconfig.json";
+        if (!this.HaveFileData(fileConfigPath))
+        {
+            this.AddExportFile(new FileConfigFile());
+        }
+    }
+
+    /// <summary>
+    /// Collect child SpriteRenderer color animation targets from an Animator's clips.
+    /// For each binding.path that targets a SpriteRenderer m_Color curve,
+    /// resolve the child GameObject and store in m_spriteColorAnimTargets.
+    /// </summary>
+    private void CollectSpriteColorAnimTargets(Animator animator)
+    {
+        AnimatorController controller = animator.runtimeAnimatorController as AnimatorController;
+        if (controller == null) return;
+
+        HashSet<string> processedPaths = new HashSet<string>();
+        foreach (AnimationClip clip in controller.animationClips)
+        {
+            foreach (EditorCurveBinding binding in AnimationUtility.GetCurveBindings(clip))
+            {
+                if (binding.type != typeof(SpriteRenderer)) continue;
+                if (!binding.propertyName.StartsWith("m_Color")) continue;
+                if (string.IsNullOrEmpty(binding.path)) continue; // Same-GO handled in GetSpriteRendererComponentData
+                if (processedPaths.Contains(binding.path)) continue;
+                processedPaths.Add(binding.path);
+
+                Transform childTransform = animator.gameObject.transform.Find(binding.path);
+                if (childTransform == null)
+                {
+                    Debug.LogWarning($"[LayaAir Export 2D] Cannot resolve animation target path '{binding.path}' from '{animator.gameObject.name}'");
+                    continue;
+                }
+                GameObject childGO = childTransform.gameObject;
+                if (!m_spriteColorAnimTargets.ContainsKey(childGO))
+                {
+                    m_spriteColorAnimTargets[childGO] = new SpriteColorAnimTarget
+                    {
+                        controller = controller,
+                        targetPath = binding.path,
+                        animatorGameObject = animator.gameObject
+                    };
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns true if this Animator only contains SpriteRenderer m_Color curves
+    /// and should be skipped for 3D Animator export (handled by 2D Animator2D instead).
+    /// </summary>
+    private static bool IsSpriteRendererColorOnlyAnimator(Animator animator)
+    {
+        if (animator.GetComponent<SpriteRenderer>() == null) return false;
+
+        AnimatorController controller = animator.runtimeAnimatorController as AnimatorController;
+        if (controller == null) return false;
+
+        foreach (AnimationClip clip in controller.animationClips)
+        {
+            EditorCurveBinding[] bindings = AnimationUtility.GetCurveBindings(clip);
+            foreach (EditorCurveBinding binding in bindings)
+            {
+                // If there's any curve that is NOT a SpriteRenderer m_Color curve,
+                // this animator has other animations too — keep the 3D Animator
+                if (!(binding.type == typeof(SpriteRenderer) && binding.propertyName.StartsWith("m_Color")))
+                {
+                    return false;
+                }
+            }
+            // Also check object reference curves (material swaps, etc.)
+            EditorCurveBinding[] objRefBindings = AnimationUtility.GetObjectReferenceCurveBindings(clip);
+            if (objRefBindings.Length > 0) return false;
+        }
+        return true;
+    }
+
+    public JSONObject GetAnimatorComponentData(Animator animator, bool isOverride, string syncScriptUuid = null)
     {
         GameObject gameObject = animator.gameObject;
         AnimatorController animatorController = (AnimatorController)animator.runtimeAnimatorController;
@@ -874,7 +1180,7 @@ internal class ResoureMap
             int layerLength = layers.Length;
             for (var i = 0; i < layerLength; i++)
             {
-                controllerLayers.Add(GetAnimaterLayerData(layers[i], gameObject, i == 0));
+                controllerLayers.Add(GetAnimaterLayerData(layers[i], gameObject, i == 0, syncScriptUuid));
             }
             controllData.AddField("controllerLayers", controllerLayers);
             this.AddExportFile(controlFile);
@@ -896,7 +1202,7 @@ internal class ResoureMap
     }
 
 
-    private JSONObject GetAnimaterLayerData(AnimatorControllerLayer layer, GameObject gameObject, bool isbaseLayer)
+    private JSONObject GetAnimaterLayerData(AnimatorControllerLayer layer, GameObject gameObject, bool isbaseLayer, string syncScriptUuid = null)
     {
         JSONObject layarNode = new JSONObject(JSONObject.Type.OBJECT);
         layarNode.AddField("_$type", "AnimatorControllerLayer");
@@ -960,6 +1266,14 @@ internal class ResoureMap
                 Debug.LogErrorFormat(gameObject, gameObject.name + " have empty or not  AnimationClip " + state.name);
             }
             statueNode.AddField("id", stateMap[state.name].ToString());
+
+            // Animator2DSync: attach state script to sync Animator2D playback
+            if (syncScriptUuid != null && clip != null)
+            {
+                JSONObject scriptsArray = new JSONObject(JSONObject.Type.ARRAY);
+                scriptsArray.Add("res://" + syncScriptUuid);
+                statueNode.AddField("scripts", scriptsArray);
+            }
 
             AnimatorStateTransition[] transitions = state.transitions;
             if (transitions.Length > 0)
