@@ -43,7 +43,14 @@ shaderPass:[
 {
     pipeline:Forward,
     VS:Effect_Basic_AlphaBlendVS,
-    FS:Effect_Basic_AlphaBlendFS
+    FS:Effect_Basic_AlphaBlendFS,
+    statefirst: true,
+    renderState: {
+        blend: "Enable",
+        blendEquation: "Add",
+        srcBlend: "SrcAlpha",
+        dstBlend: "OneMinusSrcAlpha"
+    }
 }
 ]
 }

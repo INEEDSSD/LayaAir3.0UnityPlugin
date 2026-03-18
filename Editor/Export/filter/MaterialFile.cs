@@ -130,6 +130,11 @@ internal class MaterialFile : JsonFile
     }
 
     /// <summary>
+    /// 检查此材质是否用于 CPU 粒子导出
+    /// </summary>
+    public bool IsCPUParticle() => m_isCPUParticle;
+
+    /// <summary>
     /// Check if this material is used by ParticleSystemRenderer
     /// </summary>
     public bool IsUsedByParticleSystem()

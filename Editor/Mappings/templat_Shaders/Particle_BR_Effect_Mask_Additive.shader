@@ -48,12 +48,12 @@
             pipeline: Forward,
             VS: BR_Effect_Mask_AdditiveVS,
             FS: BR_Effect_Mask_AdditiveFS,
+            statefirst: true,
             renderState: {
-                depthWrite: false,
-                blend: true,
-                blendSrc: SrcAlpha,
-                blendDst: One,
-                cull: Off
+                blend: "Enable",
+                blendEquation: "Add",
+                srcBlend: "SrcAlpha",
+                dstBlend: "One"
             }
         }
     ]

@@ -290,7 +290,6 @@ public class PropDatasConfig
         }
         else
         {
-            Debug.LogWarning($"LayaAir3D: Material '{material.name}' shader has no _SrcBlend property, using default SrcAlpha");
             return 6; // 无属性时默认SrcAlpha（透明材质）
         }
     }
@@ -338,7 +337,6 @@ public class PropDatasConfig
         else
         {
             // Fallback based on shader name
-            Debug.LogWarning($"LayaAir3D: Material '{material.name}' shader has no _DstBlend property, using fallback");
             string shaderName = material.shader?.name?.ToLower() ?? "";
             if (shaderName.Contains("additive"))
                 return 1; // One (additive blending: Src One Dst One)

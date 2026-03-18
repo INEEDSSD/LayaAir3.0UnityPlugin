@@ -65,6 +65,123 @@ internal class CustomShaderExporter
     private static long builtInConversionTime = 0;
     private static long mappingTableConversionTime = 0;
 
+    // ==================== Laya 渲染模式配置 ====================
+
+    /// <summary>
+    /// Laya MaterialRenderMode 预定义渲染模式（字段名与 .lmat 中的 s_ 前缀属性对应）
+    /// </summary>
+    private class LayaRenderModeConfig
+    {
+        public int value;
+        public int renderQueue;
+        public bool alphaTest;
+        public int s_Cull;          // 0=NONE, 1=FRONT, 2=BACK
+        public int s_Blend;         // 0=DISABLE, 1=ENABLE_ALL, 2=ENABLE_SEPERATE
+        public int s_BlendSrc;      // Laya BlendParam（仅 s_Blend>0 时有效）
+        public int s_BlendDst;      // Laya BlendParam（仅 s_Blend>0 时有效）
+        public int s_DepthTest;     // 0=OFF, 1=LESS, 2=EQUAL, 3=LEQUAL, ...
+        public bool s_DepthWrite;
+        public string[] defines;    // 额外 defines
+    }
+
+    // 渲染模式配置表（从 JSON 加载或使用内置默认值）
+    private static Dictionary<string, LayaRenderModeConfig> _layaRenderModes = null;
+
+    /// <summary>
+    /// 获取 Laya 渲染模式配置（懒加载）
+    /// </summary>
+    private static Dictionary<string, LayaRenderModeConfig> GetLayaRenderModes()
+    {
+        if (_layaRenderModes != null)
+            return _layaRenderModes;
+
+        _layaRenderModes = new Dictionary<string, LayaRenderModeConfig>();
+
+        // 尝试从配置文件加载
+        string configPath = Path.Combine(Application.dataPath, "LayaAir3.0UnityPlugin/Editor/Mappings/laya_render_modes.json");
+        if (File.Exists(configPath))
+        {
+            try
+            {
+                string json = File.ReadAllText(configPath);
+                var root = new JSONObject(json);
+                var modes = root.GetField("renderModes");
+                if (modes != null)
+                {
+                    foreach (string key in modes.keys)
+                    {
+                        var m = modes.GetField(key);
+                        var config = new LayaRenderModeConfig();
+                        config.value = (int)m.GetField("value").i;
+                        config.renderQueue = (int)m.GetField("renderQueue").i;
+
+                        var alphaTestField = m.GetField("alphaTest");
+                        config.alphaTest = alphaTestField != null && alphaTestField.b;
+
+                        var cullField = m.GetField("s_Cull");
+                        config.s_Cull = cullField != null ? (int)cullField.i : 2;
+
+                        config.s_Blend = (int)m.GetField("s_Blend").i;
+                        config.s_DepthTest = (int)m.GetField("s_DepthTest").i;
+                        config.s_DepthWrite = m.GetField("s_DepthWrite").b;
+
+                        var blendSrcField = m.GetField("s_BlendSrc");
+                        config.s_BlendSrc = blendSrcField != null ? (int)blendSrcField.i : 0;
+                        var blendDstField = m.GetField("s_BlendDst");
+                        config.s_BlendDst = blendDstField != null ? (int)blendDstField.i : 0;
+
+                        var definesField = m.GetField("defines");
+                        if (definesField != null && definesField.IsArray)
+                        {
+                            config.defines = new string[definesField.Count];
+                            for (int i = 0; i < definesField.Count; i++)
+                                config.defines[i] = definesField[i].str;
+                        }
+
+                        _layaRenderModes[key] = config;
+                    }
+                    ExportLogger.Log($"LayaAir3D: Loaded {_layaRenderModes.Count} render modes from config");
+                    return _layaRenderModes;
+                }
+            }
+            catch (System.Exception e)
+            {
+                ExportLogger.Warning($"LayaAir3D: Failed to load render modes config: {e.Message}");
+            }
+        }
+
+        // 内置默认值（与 laya_render_modes.json 及 Laya 编辑器实际 .lmat 输出保持一致）
+        _layaRenderModes["OPAQUE"] = new LayaRenderModeConfig
+            { value = 0, renderQueue = 2000, s_Cull = 2, s_Blend = 0, s_DepthTest = 1, s_DepthWrite = true };
+        _layaRenderModes["CUTOUT"] = new LayaRenderModeConfig
+            { value = 1, renderQueue = 2450, alphaTest = true, s_Cull = 2, s_Blend = 0, s_DepthTest = 1, s_DepthWrite = true };
+        _layaRenderModes["TRANSPARENT"] = new LayaRenderModeConfig
+            { value = 2, renderQueue = 3000, s_Cull = 2, s_Blend = 1, s_BlendSrc = 6, s_BlendDst = 7, s_DepthTest = 1, s_DepthWrite = false };
+        _layaRenderModes["ADDTIVE"] = new LayaRenderModeConfig
+            { value = 3, renderQueue = 3000, s_Cull = 2, s_Blend = 1, s_BlendSrc = 6, s_BlendDst = 1, s_DepthTest = 1, s_DepthWrite = false, defines = new[] { "ADDTIVEFOG" } };
+        _layaRenderModes["ALPHABLENDED"] = new LayaRenderModeConfig
+            { value = 4, renderQueue = 3000, s_Cull = 2, s_Blend = 1, s_BlendSrc = 6, s_BlendDst = 7, s_DepthTest = 1, s_DepthWrite = false };
+        _layaRenderModes["CUSTOM"] = new LayaRenderModeConfig
+            { value = 5, renderQueue = 2000, s_Cull = 2, s_Blend = 0, s_DepthTest = 1, s_DepthWrite = true };
+
+        ExportLogger.Log("LayaAir3D: Using built-in render modes defaults");
+        return _layaRenderModes;
+    }
+
+    /// <summary>
+    /// 根据 materialRenderMode 值获取对应的渲染模式配置
+    /// </summary>
+    private static LayaRenderModeConfig GetRenderModeByValue(int modeValue)
+    {
+        var modes = GetLayaRenderModes();
+        foreach (var kvp in modes)
+        {
+            if (kvp.Value.value == modeValue)
+                return kvp.Value;
+        }
+        return null;
+    }
+
     // ==================== 原有字段 ====================
 
     // 已导出的Shader缓存，避免重复导出
@@ -532,6 +649,7 @@ internal class CustomShaderExporter
     {
         if (materialFile == null) return "";
         if (materialFile.IsUsedBy2DComponent()) return ""; // 2D 已有独立类型处理
+        if (materialFile.IsCPUParticle()) return "_D3"; // CPU粒子走Mesh管线，使用D3类型
         if (materialFile.IsUsedByParticleSystem()) return "_Effect";
         if (materialFile.IsUsedByMeshRenderer()) return "_D3";
         return "";
@@ -1054,9 +1172,18 @@ internal class CustomShaderExporter
         }
         else if (parseResult.isParticleBillboard)
         {
-            // 粒子shader统一使用Effect类型
-            shaderType = LayaShaderType.Effect;
-            ExportLogger.Log($"LayaAir3D: Particle shader detected, using ShaderType: Effect");
+            if (materialFile != null && materialFile.IsCPUParticle())
+            {
+                // CPU粒子走Mesh管线，使用D3类型
+                shaderType = LayaShaderType.D3;
+                ExportLogger.Log($"LayaAir3D: CPU particle detected, using ShaderType: D3 (Mesh pipeline)");
+            }
+            else
+            {
+                // 普通粒子shader使用Effect类型
+                shaderType = LayaShaderType.Effect;
+                ExportLogger.Log($"LayaAir3D: Particle shader detected, using ShaderType: Effect");
+            }
         }
         else if (materialType == LayaMaterialType.Custom)
         {
@@ -1162,6 +1289,13 @@ internal class CustomShaderExporter
             sb.AppendLine("    },");
         }
         
+        // styles（为动态渲染状态属性提供默认值）
+        string stylesBlock = GenerateStylesBlock(parseResult);
+        if (stylesBlock != null)
+        {
+            sb.Append(stylesBlock);
+        }
+
         // shaderPass
         sb.AppendLine("    shaderPass:[");
         sb.AppendLine("        {");
@@ -1628,6 +1762,397 @@ internal class CustomShaderExporter
         }
     }
 
+    // ==================== 渲染状态 → Laya int 映射辅助方法 ====================
+
+    /// <summary>
+    /// 判断渲染状态 token 是否是属性引用（如 [_DstBlend]）
+    /// </summary>
+    private static bool IsPropertyReference(string token)
+    {
+        return !string.IsNullOrEmpty(token) && token.StartsWith("[") && token.EndsWith("]");
+    }
+
+    /// <summary>
+    /// Unity BlendMode 数值 → Laya BlendFactor 整数
+    /// </summary>
+    private static int UnityBlendFactorToLayaInt(int value)
+    {
+        switch (value)
+        {
+            case 0: return 0;   // Zero
+            case 1: return 1;   // One
+            case 2: return 4;   // DstColor → DestinationColor
+            case 3: return 2;   // SrcColor → SourceColor
+            case 4: return 5;   // OneMinusDstColor → OneMinusDestinationColor
+            case 5: return 6;   // SrcAlpha → SourceAlpha
+            case 6: return 7;   // OneMinusSrcAlpha → OneMinusSourceAlpha
+            case 7: return 8;   // DstAlpha → DestinationAlpha
+            case 8: return 9;   // OneMinusDstAlpha → OneMinusDestinationAlpha
+            case 9: return 6;   // SrcAlphaSaturate → 近似 SourceAlpha
+            case 10: return 3;  // OneMinusSrcColor → OneMinusSourceColor
+            default: return 1;  // 默认 One
+        }
+    }
+
+    /// <summary>
+    /// Unity BlendOp 数值 → Laya BlendEquation 整数
+    /// </summary>
+    private static int UnityBlendOpToLayaInt(int value)
+    {
+        switch (value)
+        {
+            case 0: return 0;  // Add
+            case 1: return 1;  // Subtract
+            case 2: return 2;  // ReverseSubtract
+            case 3: return 3;  // Min
+            case 4: return 4;  // Max
+            default: return 0; // 默认 Add
+        }
+    }
+
+    /// <summary>
+    /// Unity CullMode 数值 → Laya Cull 整数 (0=Off, 1=Front, 2=Back)
+    /// </summary>
+    private static int UnityCullToLayaInt(int value)
+    {
+        switch (value)
+        {
+            case 0: return 0;  // Off
+            case 1: return 1;  // Front
+            case 2: return 2;  // Back
+            default: return 2; // 默认 Back
+        }
+    }
+
+    /// <summary>
+    /// Unity ZTest CompareFunction 数值 → Laya DepthTest 整数
+    /// </summary>
+    private static int UnityZTestToLayaInt(int value)
+    {
+        // Unity CompareFunction: 0=Disabled, 1=Never, 2=Less, 3=Equal, 4=LessEqual, 5=Greater, 6=NotEqual, 7=GreaterEqual, 8=Always
+        // Laya DepthTest:        0=OFF,      1=LESS,  2=EQUAL, 3=LEQUAL,    4=GREATER, 5=NOTEQUAL, 6=GEQUAL,       7=ALWAYS
+        switch (value)
+        {
+            case 0: return 0;  // Disabled → OFF
+            case 1: return 0;  // Never → OFF (无直接对应)
+            case 2: return 1;  // Less → LESS
+            case 3: return 2;  // Equal → EQUAL
+            case 4: return 3;  // LessEqual → LEQUAL
+            case 5: return 4;  // Greater → GREATER
+            case 6: return 5;  // NotEqual → NOTEQUAL
+            case 7: return 6;  // GreaterEqual → GEQUAL
+            case 8: return 7;  // Always → ALWAYS
+            default: return 3; // 默认 LEQUAL
+        }
+    }
+
+    /// <summary>
+    /// Unity BlendFactor 名称 → Laya BlendFactor 整数
+    /// </summary>
+    private static int UnityBlendFactorNameToLayaInt(string name)
+    {
+        switch (name)
+        {
+            case "Zero": return 0;
+            case "One": return 1;
+            case "DstColor": return 4;
+            case "SrcColor": return 2;
+            case "OneMinusDstColor": return 5;
+            case "SrcAlpha": return 6;
+            case "OneMinusSrcAlpha": return 7;
+            case "DstAlpha": return 8;
+            case "OneMinusDstAlpha": return 9;
+            case "SrcAlphaSaturate": return 6;
+            case "OneMinusSrcColor": return 3;
+            default: return 1;
+        }
+    }
+
+    /// <summary>
+    /// Unity CullMode 名称 → Laya Cull 整数
+    /// </summary>
+    private static int UnityCullNameToLayaInt(string name)
+    {
+        switch (name)
+        {
+            case "Off": return 0;
+            case "Front": return 1;
+            case "Back": return 2;
+            default: return 2;
+        }
+    }
+
+    /// <summary>
+    /// 从属性引用 token 中提取属性名（如 "[_DstBlend]" → "_DstBlend"）
+    /// </summary>
+    private static string ExtractPropertyName(string token)
+    {
+        if (IsPropertyReference(token))
+            return token.Substring(1, token.Length - 2);
+        return null;
+    }
+
+    /// <summary>
+    /// 从 Shader properties 中获取属性引用的默认整数值
+    /// </summary>
+    private static int GetPropertyDefaultInt(string propName, List<ShaderProperty> properties)
+    {
+        if (properties != null)
+        {
+            foreach (var prop in properties)
+            {
+                if (prop.unityName == propName)
+                {
+                    return prop.defaultInt != 0 ? prop.defaultInt : (int)prop.defaultFloat;
+                }
+            }
+        }
+        return 0;
+    }
+
+    // ==================== 渲染状态解析与模式匹配 ====================
+
+    /// <summary>
+    /// 解析后的实际生效渲染状态（合并 shader 硬编码值和材质动态值后的 Laya 参数）
+    /// </summary>
+    private class ResolvedRenderState
+    {
+        // Blend 模式: 0=DISABLE, 1=ENABLE_ALL, 2=ENABLE_SEPERATE
+        public int s_Blend;
+
+        // Simple blend 参数 (s_Blend=1 时使用)
+        public int s_BlendSrc;
+        public int s_BlendDst;
+
+        // Separate blend 参数 (s_Blend=2 时使用)
+        public int s_BlendSrcRGB;
+        public int s_BlendDstRGB;
+        public int s_BlendSrcAlpha;
+        public int s_BlendDstAlpha;
+
+        // Blend 运算 (0=Add)
+        public int blendOp;
+        public int blendOpAlpha;
+
+        // Cull: 0=NONE, 1=FRONT, 2=BACK
+        public int s_Cull = 2;
+
+        // Depth
+        public bool s_DepthWrite = true;
+        public int s_DepthTest = 1; // 默认 LESS
+
+        // 标记哪些值有来源（shader中有声明）
+        public bool hasBlend;
+        public bool hasBlendOp;
+        public bool hasCull;
+        public bool hasZWrite;
+        public bool hasZTest;
+    }
+
+    /// <summary>
+    /// 将 ShaderParseResult 中的渲染状态 token 与 Material 的实际属性值合并，
+    /// 得到该材质实际生效的 Laya 渲染参数
+    /// </summary>
+    private static ResolvedRenderState ResolveRenderState(ShaderParseResult parseResult, Material material)
+    {
+        var resolved = new ResolvedRenderState();
+
+        // Blend
+        if (parseResult.blendSrc != null)
+        {
+            resolved.hasBlend = true;
+            bool isSeparate = parseResult.blendSrcAlpha != null;
+            resolved.s_Blend = isSeparate ? 2 : 1;
+
+            int srcRGB = ResolveBlendFactor(parseResult.blendSrc, material);
+            int dstRGB = ResolveBlendFactor(parseResult.blendDst, material);
+
+            if (isSeparate)
+            {
+                resolved.s_BlendSrcRGB = srcRGB;
+                resolved.s_BlendDstRGB = dstRGB;
+                resolved.s_BlendSrcAlpha = ResolveBlendFactor(parseResult.blendSrcAlpha, material);
+                resolved.s_BlendDstAlpha = ResolveBlendFactor(parseResult.blendDstAlpha, material);
+            }
+            else
+            {
+                resolved.s_BlendSrc = srcRGB;
+                resolved.s_BlendDst = dstRGB;
+            }
+        }
+
+        // BlendOp
+        if (parseResult.blendOp != null)
+        {
+            resolved.hasBlendOp = true;
+            resolved.blendOp = ResolveBlendOp(parseResult.blendOp, material);
+            resolved.blendOpAlpha = parseResult.blendOpAlpha != null
+                ? ResolveBlendOp(parseResult.blendOpAlpha, material)
+                : resolved.blendOp;
+        }
+
+        // Cull
+        if (parseResult.cullMode != null)
+        {
+            resolved.hasCull = true;
+            resolved.s_Cull = ResolveCull(parseResult.cullMode, material);
+        }
+
+        // ZWrite
+        if (parseResult.zWrite != null)
+        {
+            resolved.hasZWrite = true;
+            resolved.s_DepthWrite = ResolveZWrite(parseResult.zWrite, material);
+        }
+
+        // ZTest
+        if (parseResult.zTest != null)
+        {
+            resolved.hasZTest = true;
+            resolved.s_DepthTest = ResolveZTest(parseResult.zTest, material);
+        }
+
+        return resolved;
+    }
+
+    /// <summary>
+    /// 解析 blend factor token → Laya BlendParam int
+    /// </summary>
+    private static int ResolveBlendFactor(string token, Material material)
+    {
+        if (IsPropertyReference(token))
+        {
+            string pn = ExtractPropertyName(token);
+            int val = material.HasProperty(pn) ? material.GetInt(pn) : 0;
+            return UnityBlendFactorToLayaInt(val);
+        }
+        return UnityBlendFactorNameToLayaInt(token);
+    }
+
+    /// <summary>
+    /// 解析 blend op token → Laya BlendEquation int
+    /// </summary>
+    private static int ResolveBlendOp(string token, Material material)
+    {
+        if (IsPropertyReference(token))
+        {
+            string pn = ExtractPropertyName(token);
+            int val = material.HasProperty(pn) ? material.GetInt(pn) : 0;
+            return UnityBlendOpToLayaInt(val);
+        }
+        switch (token)
+        {
+            case "Add": return 0;
+            case "Sub": return 1;
+            case "RevSub": return 2;
+            case "Min": return 3;
+            case "Max": return 4;
+            default: return 0;
+        }
+    }
+
+    /// <summary>
+    /// 解析 cull token → Laya Cull int
+    /// </summary>
+    private static int ResolveCull(string token, Material material)
+    {
+        if (IsPropertyReference(token))
+        {
+            string pn = ExtractPropertyName(token);
+            int val = material.HasProperty(pn) ? material.GetInt(pn) : 2;
+            return UnityCullToLayaInt(val);
+        }
+        return UnityCullNameToLayaInt(token);
+    }
+
+    /// <summary>
+    /// 解析 zwrite token → bool
+    /// </summary>
+    private static bool ResolveZWrite(string token, Material material)
+    {
+        if (IsPropertyReference(token))
+        {
+            string pn = ExtractPropertyName(token);
+            int val = material.HasProperty(pn) ? material.GetInt(pn) : 1;
+            return val != 0;
+        }
+        return !string.Equals(token, "Off", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 解析 ztest token → Laya DepthTest int
+    /// </summary>
+    private static int ResolveZTest(string token, Material material)
+    {
+        if (IsPropertyReference(token))
+        {
+            string pn = ExtractPropertyName(token);
+            int val = material.HasProperty(pn) ? material.GetInt(pn) : 4; // Unity 默认 LessEqual
+            return UnityZTestToLayaInt(val);
+        }
+        // Laya: 0=OFF, 1=LESS, 2=EQUAL, 3=LEQUAL, 4=GREATER, 5=NOTEQUAL, 6=GEQUAL, 7=ALWAYS
+        switch (token)
+        {
+            case "Never": return 0;
+            case "Less": return 1;
+            case "Equal": return 2;
+            case "LEqual": return 3;
+            case "Greater": return 4;
+            case "NotEqual": return 5;
+            case "GEqual": return 6;
+            case "Always": return 7;
+            default: return 3; // LEQUAL
+        }
+    }
+
+    /// <summary>
+    /// 将解析后的渲染状态与预定义模式进行匹配
+    /// 匹配规则：s_Blend + s_BlendSrc/Dst（blend>0时）+ s_DepthWrite 必须一致
+    /// s_Cull 和 s_DepthTest 不参与匹配
+    /// </summary>
+    /// <returns>匹配的模式配置，或 null 表示需要 CUSTOM 模式</returns>
+    private static LayaRenderModeConfig MatchRenderMode(ResolvedRenderState resolved)
+    {
+        // Separate blend → 预定义模式全是简单混合(s_Blend=0或1)，不可能匹配
+        if (resolved.s_Blend == 2)
+            return null;
+
+        // 非 Add 的 BlendOp → 预定义模式不支持自定义 BlendOp
+        if (resolved.hasBlendOp && (resolved.blendOp != 0 || resolved.blendOpAlpha != 0))
+            return null;
+
+        var modes = GetLayaRenderModes();
+        foreach (var kvp in modes)
+        {
+            // 跳过 CUSTOM 模式（它是匹配失败的 fallback）
+            if (kvp.Key == "CUSTOM")
+                continue;
+
+            var mode = kvp.Value;
+
+            // s_Blend 必须一致
+            if (mode.s_Blend != resolved.s_Blend)
+                continue;
+
+            // blend 开启时检查混合因子
+            if (mode.s_Blend > 0)
+            {
+                if (mode.s_BlendSrc != resolved.s_BlendSrc)
+                    continue;
+                if (mode.s_BlendDst != resolved.s_BlendDst)
+                    continue;
+            }
+
+            // 深度写入必须一致
+            if (mode.s_DepthWrite != resolved.s_DepthWrite)
+                continue;
+
+            return mode; // 匹配成功
+        }
+
+        return null; // 无匹配 → CUSTOM
+    }
+
     /// <summary>
     /// 解析渲染状态值，处理属性引用（如 [_SrcBlend]）和字面值
     /// </summary>
@@ -1785,8 +2310,10 @@ internal class CustomShaderExporter
         // 解析 Blend 指令
         // 格式1: Blend SrcFactor DstFactor
         // 格式2: Blend SrcFactor DstFactor, SrcFactorA DstFactorA
+        // 注意：Unity shader 中属性引用 [_Prop] 前可能没有空格，如 "Blend One[_DstBlend] ,One Zero"
+        // 使用 (?:[ \t]+|(?=\[)) 在 token 之间允许"有空格"或"紧跟["两种情况
         var blendMatch = Regex.Match(cleaned,
-            @"\bBlend\s+(\[?\w+\]?)\s+(\[?\w+\]?)(?:\s*,\s*(\[?\w+\]?)\s+(\[?\w+\]?))?",
+            @"\bBlend[ \t]+(\w+|\[\w+\])(?:[ \t]+|(?=\[))(\w+|\[\w+\])(?:[ \t]*,[ \t]*(\w+|\[\w+\])(?:[ \t]+|(?=\[))(\w+|\[\w+\]))?",
             RegexOptions.IgnoreCase);
         if (blendMatch.Success)
         {
@@ -1812,7 +2339,7 @@ internal class CustomShaderExporter
         // 格式1: BlendOp Op
         // 格式2: BlendOp OpRGB, OpAlpha
         var blendOpMatch = Regex.Match(cleaned,
-            @"\bBlendOp\s+(\[?\w+\]?)(?:\s*,\s*(\[?\w+\]?))?",
+            @"\bBlendOp(?:[ \t]+|(?=\[))(\w+|\[\w+\])(?:[ \t]*,[ \t]*(\w+|\[\w+\]))?",
             RegexOptions.IgnoreCase);
         if (blendOpMatch.Success)
         {
@@ -1823,22 +2350,22 @@ internal class CustomShaderExporter
             }
         }
 
-        // 解析 ZWrite 指令
-        var zWriteMatch = Regex.Match(cleaned, @"\bZWrite\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+        // 解析 ZWrite 指令 — "ZWrite[_ZWrite]" 无空格情况
+        var zWriteMatch = Regex.Match(cleaned, @"\bZWrite(?:[ \t]+|(?=\[))(\w+|\[\w+\])", RegexOptions.IgnoreCase);
         if (zWriteMatch.Success)
         {
             result.zWrite = zWriteMatch.Groups[1].Value.Trim();
         }
 
         // 解析 ZTest 指令
-        var zTestMatch = Regex.Match(cleaned, @"\bZTest\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+        var zTestMatch = Regex.Match(cleaned, @"\bZTest(?:[ \t]+|(?=\[))(\w+|\[\w+\])", RegexOptions.IgnoreCase);
         if (zTestMatch.Success)
         {
             result.zTest = zTestMatch.Groups[1].Value.Trim();
         }
 
-        // 解析 Cull 指令
-        var cullMatch = Regex.Match(cleaned, @"\bCull\s+(\[?\w+\]?)", RegexOptions.IgnoreCase);
+        // 解析 Cull 指令 — "Cull[_Cull]" 无空格情况
+        var cullMatch = Regex.Match(cleaned, @"\bCull(?:[ \t]+|(?=\[))(\w+|\[\w+\])", RegexOptions.IgnoreCase);
         if (cullMatch.Success)
         {
             result.cullMode = cullMatch.Groups[1].Value.Trim();
@@ -1859,6 +2386,113 @@ internal class CustomShaderExporter
     }
 
     /// <summary>
+    /// 为动态（属性引用）渲染状态参数生成 styles 块，提供默认值
+    /// 只处理 [_Prop] 形式的属性引用，硬编码值由 renderState 处理
+    /// </summary>
+    private static string GenerateStylesBlock(ShaderParseResult parseResult)
+    {
+        if (!HasRenderState(parseResult))
+            return null;
+
+        var props = parseResult.properties;
+        List<string> entries = new List<string>();
+
+        // materialRenderMode 默认值（CUSTOM=5，材质可根据匹配结果覆盖）
+        entries.Add("        materialRenderMode: { default: 5 }");
+
+        // Blend 动态参数默认值
+        if (parseResult.blendSrc != null)
+        {
+            bool isSeparate = parseResult.blendSrcAlpha != null;
+            // s_Blend 默认值：2=Separate, 1=Enable
+            entries.Add($"        s_Blend: {{ default: {(isSeparate ? 2 : 1)} }}");
+
+            if (isSeparate)
+            {
+                if (IsPropertyReference(parseResult.blendSrc))
+                {
+                    string propName = ExtractPropertyName(parseResult.blendSrc);
+                    int defVal = UnityBlendFactorToLayaInt(GetPropertyDefaultInt(propName, props));
+                    entries.Add($"        s_BlendSrcRGB: {{ default: {defVal} }}");
+                }
+                if (IsPropertyReference(parseResult.blendDst))
+                {
+                    string propName = ExtractPropertyName(parseResult.blendDst);
+                    int defVal = UnityBlendFactorToLayaInt(GetPropertyDefaultInt(propName, props));
+                    entries.Add($"        s_BlendDstRGB: {{ default: {defVal} }}");
+                }
+                if (IsPropertyReference(parseResult.blendSrcAlpha))
+                {
+                    string propName = ExtractPropertyName(parseResult.blendSrcAlpha);
+                    int defVal = UnityBlendFactorToLayaInt(GetPropertyDefaultInt(propName, props));
+                    entries.Add($"        s_BlendSrcAlpha: {{ default: {defVal} }}");
+                }
+                if (IsPropertyReference(parseResult.blendDstAlpha))
+                {
+                    string propName = ExtractPropertyName(parseResult.blendDstAlpha);
+                    int defVal = UnityBlendFactorToLayaInt(GetPropertyDefaultInt(propName, props));
+                    entries.Add($"        s_BlendDstAlpha: {{ default: {defVal} }}");
+                }
+            }
+            else
+            {
+                if (IsPropertyReference(parseResult.blendSrc))
+                {
+                    string propName = ExtractPropertyName(parseResult.blendSrc);
+                    int defVal = UnityBlendFactorToLayaInt(GetPropertyDefaultInt(propName, props));
+                    entries.Add($"        s_BlendSrc: {{ default: {defVal} }}");
+                }
+                if (IsPropertyReference(parseResult.blendDst))
+                {
+                    string propName = ExtractPropertyName(parseResult.blendDst);
+                    int defVal = UnityBlendFactorToLayaInt(GetPropertyDefaultInt(propName, props));
+                    entries.Add($"        s_BlendDst: {{ default: {defVal} }}");
+                }
+            }
+        }
+
+        // Cull 动态参数
+        if (IsPropertyReference(parseResult.cullMode))
+        {
+            string propName = ExtractPropertyName(parseResult.cullMode);
+            int defVal = UnityCullToLayaInt(GetPropertyDefaultInt(propName, props));
+            entries.Add($"        s_Cull: {{ default: {defVal} }}");
+        }
+
+        // ZWrite 动态参数
+        if (IsPropertyReference(parseResult.zWrite))
+        {
+            string propName = ExtractPropertyName(parseResult.zWrite);
+            int defVal = GetPropertyDefaultInt(propName, props);
+            entries.Add($"        s_DepthWrite: {{ default: {(defVal == 0 ? "false" : "true")} }}");
+        }
+
+        // ZTest 动态参数
+        if (IsPropertyReference(parseResult.zTest))
+        {
+            string propName = ExtractPropertyName(parseResult.zTest);
+            int defVal = UnityZTestToLayaInt(GetPropertyDefaultInt(propName, props));
+            entries.Add($"        s_DepthTest: {{ default: {defVal} }}");
+        }
+
+        // 安全检查：没有 entries 则不生成 styles 块（正常情况下不会触发）
+        if (entries.Count == 0)
+            return null;
+
+        StringBuilder sb = new StringBuilder();
+        sb.AppendLine("    styles: {");
+        for (int i = 0; i < entries.Count; i++)
+        {
+            if (i < entries.Count - 1)
+                sb.AppendLine(entries[i] + ",");
+            else
+                sb.AppendLine(entries[i]);
+        }
+        sb.AppendLine("    },");
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// 生成renderState代码块，返回生成的字符串（如果没有有效条目则返回null）
     /// </summary>
     private static string GenerateRenderStateBlock(ShaderParseResult parseResult)
@@ -1869,7 +2503,7 @@ internal class CustomShaderExporter
         var props = parseResult.properties;
         List<string> entries = new List<string>();
 
-        // Blend 状态
+        // Blend 状态 — 属性引用 [_Prop] 不写入 shader renderState，由材质控制
         if (parseResult.blendSrc != null)
         {
             bool isSeparate = parseResult.blendSrcAlpha != null;
@@ -1878,31 +2512,37 @@ internal class CustomShaderExporter
             {
                 entries.Add("                blend: \"Seperate\"");
 
-                string srcRGB = ResolveRenderStateValue(parseResult.blendSrc, props,
-                    UnityBlendFactorToLayaString, UnityBlendFactorNameToLayaString);
-                string dstRGB = ResolveRenderStateValue(parseResult.blendDst, props,
-                    UnityBlendFactorToLayaString, UnityBlendFactorNameToLayaString);
-                string srcA = ResolveRenderStateValue(parseResult.blendSrcAlpha, props,
-                    UnityBlendFactorToLayaString, UnityBlendFactorNameToLayaString);
-                string dstA = ResolveRenderStateValue(parseResult.blendDstAlpha, props,
-                    UnityBlendFactorToLayaString, UnityBlendFactorNameToLayaString);
-
-                if (srcRGB != null) entries.Add($"                srcBlendRGB: \"{srcRGB}\"");
-                if (dstRGB != null) entries.Add($"                dstBlendRGB: \"{dstRGB}\"");
-                if (srcA != null) entries.Add($"                srcBlendAlpha: \"{srcA}\"");
-                if (dstA != null) entries.Add($"                dstBlendAlpha: \"{dstA}\"");
+                // 只写入硬编码值，跳过属性引用
+                if (!IsPropertyReference(parseResult.blendSrc))
+                {
+                    string srcRGB = UnityBlendFactorNameToLayaString(parseResult.blendSrc);
+                    if (srcRGB != null) entries.Add($"                srcBlendRGB: \"{srcRGB}\"");
+                }
+                if (!IsPropertyReference(parseResult.blendDst))
+                {
+                    string dstRGB = UnityBlendFactorNameToLayaString(parseResult.blendDst);
+                    if (dstRGB != null) entries.Add($"                dstBlendRGB: \"{dstRGB}\"");
+                }
+                if (!IsPropertyReference(parseResult.blendSrcAlpha))
+                {
+                    string srcA = UnityBlendFactorNameToLayaString(parseResult.blendSrcAlpha);
+                    if (srcA != null) entries.Add($"                srcBlendAlpha: \"{srcA}\"");
+                }
+                if (!IsPropertyReference(parseResult.blendDstAlpha))
+                {
+                    string dstA = UnityBlendFactorNameToLayaString(parseResult.blendDstAlpha);
+                    if (dstA != null) entries.Add($"                dstBlendAlpha: \"{dstA}\"");
+                }
 
                 // 分离BlendOp
-                if (parseResult.blendOp != null)
+                if (parseResult.blendOp != null && !IsPropertyReference(parseResult.blendOp))
                 {
-                    string opRGB = ResolveRenderStateValue(parseResult.blendOp, props,
-                        UnityBlendOpToLayaString, UnityBlendOpNameToLayaString);
+                    string opRGB = UnityBlendOpNameToLayaString(parseResult.blendOp);
                     if (opRGB != null) entries.Add($"                blendEquationRGB: \"{opRGB}\"");
                 }
-                if (parseResult.blendOpAlpha != null)
+                if (parseResult.blendOpAlpha != null && !IsPropertyReference(parseResult.blendOpAlpha))
                 {
-                    string opA = ResolveRenderStateValue(parseResult.blendOpAlpha, props,
-                        UnityBlendOpToLayaString, UnityBlendOpNameToLayaString);
+                    string opA = UnityBlendOpNameToLayaString(parseResult.blendOpAlpha);
                     if (opA != null) entries.Add($"                blendEquationAlpha: \"{opA}\"");
                 }
             }
@@ -1910,69 +2550,51 @@ internal class CustomShaderExporter
             {
                 entries.Add("                blend: \"Enable\"");
 
-                string src = ResolveRenderStateValue(parseResult.blendSrc, props,
-                    UnityBlendFactorToLayaString, UnityBlendFactorNameToLayaString);
-                string dst = ResolveRenderStateValue(parseResult.blendDst, props,
-                    UnityBlendFactorToLayaString, UnityBlendFactorNameToLayaString);
-
-                if (src != null) entries.Add($"                srcBlend: \"{src}\"");
-                if (dst != null) entries.Add($"                dstBlend: \"{dst}\"");
+                // 只写入硬编码值，跳过属性引用
+                if (!IsPropertyReference(parseResult.blendSrc))
+                {
+                    string src = UnityBlendFactorNameToLayaString(parseResult.blendSrc);
+                    if (src != null) entries.Add($"                srcBlend: \"{src}\"");
+                }
+                if (!IsPropertyReference(parseResult.blendDst))
+                {
+                    string dst = UnityBlendFactorNameToLayaString(parseResult.blendDst);
+                    if (dst != null) entries.Add($"                dstBlend: \"{dst}\"");
+                }
 
                 // 简单BlendOp
-                if (parseResult.blendOp != null)
+                if (parseResult.blendOp != null && !IsPropertyReference(parseResult.blendOp))
                 {
-                    string op = ResolveRenderStateValue(parseResult.blendOp, props,
-                        UnityBlendOpToLayaString, UnityBlendOpNameToLayaString);
+                    string op = UnityBlendOpNameToLayaString(parseResult.blendOp);
                     if (op != null) entries.Add($"                blendEquation: \"{op}\"");
                 }
             }
         }
 
-        // ZWrite
-        if (parseResult.zWrite != null)
+        // ZWrite — 属性引用跳过，由材质控制
+        if (parseResult.zWrite != null && !IsPropertyReference(parseResult.zWrite))
         {
-            string zw = parseResult.zWrite;
-            if (zw.StartsWith("[") && zw.EndsWith("]"))
-            {
-                // 属性引用
-                string propName = zw.Substring(1, zw.Length - 2);
-                if (props != null)
-                {
-                    foreach (var prop in props)
-                    {
-                        if (prop.unityName == propName)
-                        {
-                            int val = prop.defaultInt != 0 ? prop.defaultInt : (int)prop.defaultFloat;
-                            if (val == 0) entries.Add("                depthWrite: false");
-                            // val == 1 is default (On), don't output
-                            break;
-                        }
-                    }
-                }
-            }
-            else if (string.Equals(zw, "Off", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(parseResult.zWrite, "Off", StringComparison.OrdinalIgnoreCase))
             {
                 entries.Add("                depthWrite: false");
             }
             // ZWrite On is default, skip
         }
 
-        // ZTest
-        if (parseResult.zTest != null)
+        // ZTest — 属性引用跳过，由材质控制
+        if (parseResult.zTest != null && !IsPropertyReference(parseResult.zTest))
         {
-            string zt = ResolveRenderStateValue(parseResult.zTest, props,
-                UnityZTestToLayaString, UnityZTestNameToLayaString);
+            string zt = UnityZTestNameToLayaString(parseResult.zTest);
             if (zt != null && zt != "LessEqual") // LessEqual is default
             {
                 entries.Add($"                depthTest: \"{zt}\"");
             }
         }
 
-        // Cull
-        if (parseResult.cullMode != null)
+        // Cull — 属性引用跳过，由材质控制
+        if (parseResult.cullMode != null && !IsPropertyReference(parseResult.cullMode))
         {
-            string cull = ResolveRenderStateValue(parseResult.cullMode, props,
-                UnityCullToLayaString, UnityCullNameToLayaString);
+            string cull = UnityCullNameToLayaString(parseResult.cullMode);
             if (cull != null && cull != "Back") // Back is default
             {
                 entries.Add($"                cull: \"{cull}\"");
@@ -9385,7 +10007,12 @@ internal class CustomShaderExporter
                 bool isParticle = materialFile.IsUsedByParticleSystem();
                 bool isMesh = materialFile.IsUsedByMeshRenderer();
 
-                if (isParticle && !isMesh)
+                if (materialFile.IsCPUParticle())
+                {
+                    shaderType = LayaShaderType.D3;
+                    ExportLogger.Log($"LayaAir3D: Using D3 shader type (CPU particle uses Mesh pipeline): {shaderName}");
+                }
+                else if (isParticle && !isMesh)
                 {
                     shaderType = LayaShaderType.Effect;
                     ExportLogger.Log($"LayaAir3D: Using Effect shader type (used by ParticleSystemRenderer): {shaderName}");
@@ -11922,21 +12549,119 @@ internal class CustomShaderExporter
         // 设置材质类型为自定义Shader名称
         props.AddField("type", layaShaderName);
         
-        // 渲染状态
-        props.AddField("s_Cull", PropDatasConfig.GetCull(material));
-        int blendEnabled = PropDatasConfig.GetBlend(material);
-        props.AddField("s_Blend", blendEnabled);
-        props.AddField("s_BlendSrc", PropDatasConfig.GetSrcBlend(material));
-        props.AddField("s_BlendDst", PropDatasConfig.GetDstBlend(material));
-        // 深度写入：读取 _ZWrite 属性；若材质开启混合但无 _ZWrite 属性则默认关闭（透明物体通常不写深度）
-        bool zWrite = PropDatasConfig.GetZWrite(material);
-        if (blendEnabled == 1 && !material.HasProperty("_ZWrite"))
-            zWrite = false;
-        props.AddField("s_DepthWrite", zWrite);
+        // ==================== 渲染状态导出（两路径方案）====================
+        // 流程：解析shader渲染状态 → 合成实际生效值 → 匹配预定义模式
+        //   路径A（匹配成功）：materialRenderMode=N + 标准参数
+        //   路径B（不匹配）：materialRenderMode=5(CUSTOM) + 动态参数（硬编码由shader statefirst处理）
+        LayaRenderModeConfig matchedRenderMode = null;
+
+        string shaderPath = AssetDatabase.GetAssetPath(shader);
+        string matShaderSource = null;
+        if (!string.IsNullOrEmpty(shaderPath) && File.Exists(shaderPath))
+        {
+            try { matShaderSource = File.ReadAllText(shaderPath); }
+            catch (System.Exception) { matShaderSource = null; }
+        }
+
+        if (matShaderSource != null)
+        {
+            // 第一步：解析 shader 渲染状态（保留原始 token，区分硬编码和属性引用）
+            ShaderParseResult matParseResult = new ShaderParseResult();
+            ParseRenderState(matShaderSource, matParseResult);
+
+            // 第二步：结合材质数据，解析出实际生效的 Laya 渲染参数
+            ResolvedRenderState resolved = ResolveRenderState(matParseResult, material);
+
+            // 第三步：与预定义模式匹配
+            matchedRenderMode = MatchRenderMode(resolved);
+
+            if (matchedRenderMode != null)
+            {
+                // ★ 路径 A：匹配预定义模式
+                // 写入 materialRenderMode + 全部标准渲染参数（与 Laya 编辑器 .lmat 输出一致）
+                props.AddField("renderQueue", material.renderQueue);
+                props.AddField("materialRenderMode", matchedRenderMode.value);
+                props.AddField("s_Cull", resolved.s_Cull);
+                props.AddField("s_Blend", matchedRenderMode.s_Blend);
+                if (matchedRenderMode.s_Blend > 0)
+                {
+                    props.AddField("s_BlendSrc", matchedRenderMode.s_BlendSrc);
+                    props.AddField("s_BlendDst", matchedRenderMode.s_BlendDst);
+                }
+                props.AddField("s_DepthTest", resolved.s_DepthTest);
+                props.AddField("s_DepthWrite", matchedRenderMode.s_DepthWrite);
+
+                ExportLogger.Log($"LayaAir3D: Material '{material.name}' matched render mode " +
+                    $"'{matchedRenderMode.value}' (s_Blend={matchedRenderMode.s_Blend}, " +
+                    $"s_DepthWrite={matchedRenderMode.s_DepthWrite})");
+            }
+            else
+            {
+                // ★ 路径 B：CUSTOM 模式
+                // shader 中的硬编码值由 statefirst 处理，材质只写动态 blend 参数 + 始终写 cull/zwrite/ztest
+                props.AddField("renderQueue", material.renderQueue);
+                props.AddField("materialRenderMode", 5); // CUSTOM
+
+                // s_Blend 始终写入（标识混合模式类型）
+                props.AddField("s_Blend", resolved.s_Blend);
+
+                // Blend 参数 — 只写入属性引用（动态）的值，硬编码部分由 shader statefirst 处理
+                if (matParseResult.blendSrc != null)
+                {
+                    if (resolved.s_Blend == 2)
+                    {
+                        // Separate blend
+                        if (IsPropertyReference(matParseResult.blendSrc))
+                            props.AddField("s_BlendSrcRGB", resolved.s_BlendSrcRGB);
+                        if (IsPropertyReference(matParseResult.blendDst))
+                            props.AddField("s_BlendDstRGB", resolved.s_BlendDstRGB);
+                        if (IsPropertyReference(matParseResult.blendSrcAlpha))
+                            props.AddField("s_BlendSrcAlpha", resolved.s_BlendSrcAlpha);
+                        if (IsPropertyReference(matParseResult.blendDstAlpha))
+                            props.AddField("s_BlendDstAlpha", resolved.s_BlendDstAlpha);
+                    }
+                    else
+                    {
+                        // Simple blend
+                        if (IsPropertyReference(matParseResult.blendSrc))
+                            props.AddField("s_BlendSrc", resolved.s_BlendSrc);
+                        if (IsPropertyReference(matParseResult.blendDst))
+                            props.AddField("s_BlendDst", resolved.s_BlendDst);
+                    }
+                }
+
+                // Cull / ZWrite / ZTest — 始终写入材质
+                props.AddField("s_Cull", resolved.s_Cull);
+                props.AddField("s_DepthTest", resolved.s_DepthTest);
+                props.AddField("s_DepthWrite", resolved.s_DepthWrite);
+
+                ExportLogger.Log($"LayaAir3D: Material '{material.name}' → CUSTOM mode " +
+                    $"(s_Blend={resolved.s_Blend}, s_Cull={resolved.s_Cull}, " +
+                    $"s_DepthWrite={resolved.s_DepthWrite})");
+            }
+        }
+        else
+        {
+            // Fallback：无法读取 shader 源码时，保留原有启发式逻辑
+            props.AddField("renderQueue", material.renderQueue);
+            props.AddField("materialRenderMode", PropDatasConfig.GetRenderModule(material));
+            props.AddField("s_Cull", PropDatasConfig.GetCull(material));
+            int blendEnabled = PropDatasConfig.GetBlend(material);
+            props.AddField("s_Blend", blendEnabled);
+            if (blendEnabled > 0)
+            {
+                props.AddField("s_BlendSrc", PropDatasConfig.GetSrcBlend(material));
+                props.AddField("s_BlendDst", PropDatasConfig.GetDstBlend(material));
+            }
+            props.AddField("s_DepthTest", 1); // 默认 LESS
+            bool zWrite = PropDatasConfig.GetZWrite(material);
+            if (blendEnabled == 1 && !material.HasProperty("_ZWrite"))
+                zWrite = false;
+            props.AddField("s_DepthWrite", zWrite);
+        }
+
         props.AddField("alphaTest", PropDatasConfig.GetAlphaTest(material));
         props.AddField("alphaTestValue", PropDatasConfig.GetAlphaTestValue(material));
-        props.AddField("renderQueue", material.renderQueue);
-        props.AddField("materialRenderMode", PropDatasConfig.GetRenderModule(material));
         
         // 导出纹理
         JSONObject textures = new JSONObject(JSONObject.Type.ARRAY);
@@ -12164,6 +12889,16 @@ internal class CustomShaderExporter
             {
                 defines.Add("RENDERMODE_MESH");
                 ExportLogger.Log($"LayaAir3D: Added RENDERMODE_MESH define for particle mesh rendering mode");
+            }
+        }
+
+        // 匹配模式特有的 defines（如 ADDTIVE 模式的 ADDTIVEFOG）
+        if (matchedRenderMode != null && matchedRenderMode.defines != null)
+        {
+            foreach (var d in matchedRenderMode.defines)
+            {
+                if (!defines.Contains(d))
+                    defines.Add(d);
             }
         }
 

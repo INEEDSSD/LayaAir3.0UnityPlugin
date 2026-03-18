@@ -47,7 +47,16 @@ shaderPass:[
 {
     pipeline:Forward,
     VS:Effect_Basic_AdditiveVS,
-    FS:Effect_Basic_AdditiveFS
+    FS:Effect_Basic_AdditiveFS,
+    renderState: {
+        blend: "Seperate",
+        blendEquationRGB: "Add",
+        blendEquationAlpha: "Add",
+        srcBlendRGB: "SrcAlpha",
+        dstBlendRGB: "One",
+        srcBlendAlpha: "SrcAlpha",
+        dstBlendAlpha: "One"
+    }
 }
 ]
 }

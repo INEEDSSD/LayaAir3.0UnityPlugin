@@ -102,13 +102,6 @@
             VS: Effect_AParticleShaderVS,
             FS: Effect_AParticleShaderFS,
             renderState: {
-                depthWrite: false,
-                blend: true,
-                blendSrc: SrcAlpha,
-                blendDst: OneMinusSrcAlpha,
-                blendSrcAlpha: SrcAlpha,
-                blendDstAlpha: OneMinusSrcAlpha,
-                cull: Off
             }
         }
     ]
