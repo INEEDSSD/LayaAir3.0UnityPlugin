@@ -355,15 +355,6 @@ internal class ResoureMap
         // 检查不支持的组件
         UnsupportedFeatureCollector.CheckGameObject(gameObject);
 
-        // UI Image 优先检测 — 写入 2D 属性后直接返回，不写 _$comp
-        UnityEngine.UI.Image uiImage = gameObject.GetComponent<UnityEngine.UI.Image>();
-        if (uiImage != null)
-        {
-            node.AddField("_$type", "Image");
-            WriteImageData(node, uiImage);
-            return;
-        }
-
         Camera camera = gameObject.GetComponent<Camera>();
         if (camera != null)
         {
