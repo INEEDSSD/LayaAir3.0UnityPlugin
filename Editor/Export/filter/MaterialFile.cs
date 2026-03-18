@@ -11,12 +11,20 @@ internal class MaterialFile : JsonFile
     private bool m_isCPUParticle = false;
     private HashSet<System.Type> m_rendererTypes = new HashSet<System.Type>();
     private bool m_isParticleMeshMode = false; // ⭐ Track if particle uses mesh rendering mode
+    private bool m_isUsedBy2DComponent = false; // ★ Track if used by 2D/UI component (SpriteRenderer or Image)
 
-    public MaterialFile(ResoureMap map, Material material, Renderer renderer = null, bool isCPUParticle = false) : base(null,new JSONObject(JSONObject.Type.OBJECT))
+    public MaterialFile(ResoureMap map, Material material, Renderer renderer = null,
+        string pathOverride = null, bool is2DUsage = false, bool isCPUParticle = false) : base(null,new JSONObject(JSONObject.Type.OBJECT))
     {
         this.resoureMap = map;
         this.m_material = material;
         this.m_isCPUParticle = isCPUParticle;
+
+        // ★ 2D 标记必须在 WriteMetarial 之前设置（Image 没有 Renderer，靠此参数传入）
+        if (is2DUsage)
+        {
+            m_isUsedBy2DComponent = true;
+        }
 
         // Track which type of renderer uses this material
         if (renderer != null)
@@ -33,6 +41,12 @@ internal class MaterialFile : JsonFile
                     m_isParticleMeshMode = true;
                     ExportLogger.Log($"LayaAir3D: Particle system '{renderer.gameObject.name}' uses MESH render mode");
                 }
+            }
+
+            // ★ Check if used by SpriteRenderer (2D component)
+            if (renderer is SpriteRenderer)
+            {
+                m_isUsedBy2DComponent = true;
             }
         }
 
@@ -53,12 +67,12 @@ internal class MaterialFile : JsonFile
         else if (isBuiltinResource && (isParticleMaterial || isUsedByParticle))
         {
             m_isBuiltinParticleMaterial = true;
-            this.updatePath(AssetsUtil.GetMaterialPath(material));
+            this.updatePath(pathOverride ?? AssetsUtil.GetMaterialPath(material));
             WriteBuiltinParticleMaterial(material, this.jsonData, map);
         }
         else
         {
-            this.updatePath(AssetsUtil.GetMaterialPath(material));
+            this.updatePath(pathOverride ?? AssetsUtil.GetMaterialPath(material));
             if(material.shader.name == "Skybox/6 Sided")
             {
                 MetarialUitls.WriteSkyMetarial(material, this.jsonData, map);
@@ -90,7 +104,29 @@ internal class MaterialFile : JsonFile
                     ExportLogger.Log($"LayaAir3D: Particle system '{renderer.gameObject.name}' uses MESH render mode");
                 }
             }
+
+            // ★ Check if used by SpriteRenderer (2D component)
+            if (renderer is SpriteRenderer)
+            {
+                m_isUsedBy2DComponent = true;
+            }
         }
+    }
+
+    /// <summary>
+    /// 标记此材质被 2D/UI 组件使用（如 Image，没有 Renderer 组件）
+    /// </summary>
+    public void MarkAs2DUsage()
+    {
+        m_isUsedBy2DComponent = true;
+    }
+
+    /// <summary>
+    /// 检查此材质是否被 2D/UI 组件使用（SpriteRenderer 或 Image）
+    /// </summary>
+    public bool IsUsedBy2DComponent()
+    {
+        return m_isUsedBy2DComponent;
     }
 
     /// <summary>

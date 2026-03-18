@@ -4,7 +4,8 @@ using UnityEngine;
 
 /// <summary>
 /// A 2D Laya UI prefab file (.lh) containing an Image component with a sprite texture.
-/// Generated during SpriteRenderer export and referenced by the UI3D component as its prefab.
+/// Generated during SpriteRenderer / Image export and referenced by the UI3D component as its prefab.
+/// Optionally includes a custom material reference for non-default shaders.
 /// </summary>
 internal class UI2DPrefabFile : FileData
 {
@@ -15,11 +16,14 @@ internal class UI2DPrefabFile : FileData
     /// <param name="spriteName">Display name for the Image node</param>
     /// <param name="pixelWidth">Sprite pixel width</param>
     /// <param name="pixelHeight">Sprite pixel height</param>
+    /// <param name="materialFile">Optional custom material file (null = use default material)</param>
     public UI2DPrefabFile(string virtualPath, TextureFile textureFile,
-                          string spriteName, int pixelWidth, int pixelHeight)
+                          string spriteName, int pixelWidth, int pixelHeight,
+                          MaterialFile materialFile = null)
         : base(virtualPath)
     {
-        m_data = BuildData(textureFile.uuid, spriteName, pixelWidth, pixelHeight);
+        m_data = BuildData(textureFile.uuid, spriteName, pixelWidth, pixelHeight,
+                          materialFile != null ? materialFile.uuid : null);
     }
 
     protected override string getOutFilePath(string path)
@@ -29,7 +33,8 @@ internal class UI2DPrefabFile : FileData
     }
 
     private static JSONObject BuildData(string textureUuid, string spriteName,
-                                        int pixelWidth, int pixelHeight)
+                                        int pixelWidth, int pixelHeight,
+                                        string materialUuid)
     {
         JSONObject root = new JSONObject(JSONObject.Type.OBJECT);
         root.AddField("_$ver", 1);
@@ -39,6 +44,16 @@ internal class UI2DPrefabFile : FileData
         root.AddField("width", pixelWidth);
         root.AddField("height", pixelHeight);
         root.AddField("skin", "res://" + textureUuid);
+
+        // 自定义材质引用（使用非默认shader时导出）
+        if (!string.IsNullOrEmpty(materialUuid))
+        {
+            JSONObject matRef = new JSONObject(JSONObject.Type.OBJECT);
+            matRef.AddField("_$uuid", materialUuid);
+            matRef.AddField("_$type", "Material");
+            root.AddField("material", matRef);
+        }
+
         return root;
     }
 

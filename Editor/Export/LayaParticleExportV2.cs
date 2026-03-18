@@ -49,8 +49,8 @@ namespace LayaExport
                 return null;
             }
             
-            // ⭐ 检查粒子系统mesh顶点数量限制
-            CheckParticleVertexLimit(ps, psr, gameObject.name, resoureMap);
+            // [DEBUG] 暂时屏蔽GPU粒子mesh顶点数量检测
+            // CheckParticleVertexLimit(ps, psr, gameObject.name, resoureMap);
 
             JSONObject comp = new JSONObject(JSONObject.Type.OBJECT);
             comp.AddField("_$type", "ShurikenParticleRenderer");
@@ -155,29 +155,15 @@ namespace LayaExport
                     comp.AddField("stretchedBillboardLengthScale", psr.lengthScale);
             }
 
-            // Mesh模式下的 RenderAlignment 检查
-            // Unity 中 Mesh + View alignment 相当于 billboard 效果，
-            // 但 LayaAir 中 Mesh 就是 Mesh，没有 RenderAlignment 属性，无法实现此效果
-            if (renderMode == 4 && psr.alignment == ParticleSystemRenderSpace.View)
-            {
-                UnsupportedFeatureCollector.AddWarning(
-                    "ParticleRenderer Mesh+View Alignment（粒子Mesh模式+朝向摄像机）",
-                    psr.gameObject,
-                    "LayaAir 中 Mesh 模式不支持 RenderAlignment=View，粒子不会朝向摄像机，如需此效果请改用 Billboard 模式"
-                );
-            }
-
-            // Billboard模式下的 RenderAlignment=Local 检查
-            // Unity 中 Billboard + Local alignment 粒子会跟随发射器的局部坐标轴旋转，表现类似 Mesh 模式
-            // LayaAir 中 Billboard 始终朝向摄像机，无法还原 Local alignment 的效果
-            if (renderMode == 0 && psr.alignment == ParticleSystemRenderSpace.Local)
-            {
-                UnsupportedFeatureCollector.AddWarning(
-                    "ParticleRenderer Billboard+Local Alignment（粒子Billboard模式+局部对齐）",
-                    psr.gameObject,
-                    "Unity 中 Billboard+RenderAlignment=Local 粒子会跟随发射器局部坐标旋转（类似Mesh表现），LayaAir 中 Billboard 始终朝向摄像机，无法还原此效果。如需类似表现请改用 Mesh 模式"
-                );
-            }
+            // [DEBUG] 暂时屏蔽GPU粒子渲染器对齐方式的兼容性检测
+            // if (renderMode == 4 && psr.alignment == ParticleSystemRenderSpace.View)
+            // {
+            //     UnsupportedFeatureCollector.AddWarning(...);
+            // }
+            // if (renderMode == 0 && psr.alignment == ParticleSystemRenderSpace.Local)
+            // {
+            //     UnsupportedFeatureCollector.AddWarning(...);
+            // }
 
             // Mesh模式
             if (renderMode == 4 && psr.mesh != null)
@@ -257,8 +243,9 @@ namespace LayaExport
             ExportStartColor(main, particleSystem);
 
             // gravityModifier
-            if (main.gravityModifier.constant != 0)
-                particleSystem.AddField("gravityModifier", main.gravityModifier.constant);
+            float gravityModifier = EvaluateMinMaxCurveConstant(main.gravityModifier);
+            if (gravityModifier != 0)
+                particleSystem.AddField("gravityModifier", gravityModifier);
 
             // simulationSpace: 0=world, 1=local
             int simSpace = main.simulationSpace == ParticleSystemSimulationSpace.World ? 0 : 1;
@@ -321,7 +308,8 @@ namespace LayaExport
             if (ps.textureSheetAnimation.enabled)
                 ExportTextureSheetAnimation(ps.textureSheetAnimation, particleSystem);
 
-            CheckUnsupportedParticleFeatures(ps, main);
+            // [DEBUG] 暂时屏蔽GPU粒子不支持功能的检测，排查CPU粒子问题
+            // CheckUnsupportedParticleFeatures(ps, main);
         }
 
         /// <summary>
@@ -338,7 +326,7 @@ namespace LayaExport
                 UnsupportedFeatureCollector.AddWarning(
                     "ParticleSystem GravityModifier（重力修改器非常量类型）",
                     go,
-                    $"当前模式: {main.gravityModifier.mode}，LayaAir 仅支持 Constant 类型，将以常量值 {main.gravityModifier.constant:F3} 导出"
+                    $"当前模式: {main.gravityModifier.mode}，LayaAir 仅支持 Constant 类型，将以常量值 {EvaluateMinMaxCurveConstant(main.gravityModifier):F3} 导出"
                 );
             }
 
@@ -361,7 +349,7 @@ namespace LayaExport
                 UnsupportedFeatureCollector.AddWarning(
                     "ParticleSystem Emission RateOverTime（发射率非常量类型）",
                     go,
-                    $"当前模式: {ps.emission.rateOverTime.mode}，LayaAir 仅支持 Constant 模式，将以常量值 {ps.emission.rateOverTime.constant:F1} 导出（曲线数据丢失）"
+                    $"当前模式: {ps.emission.rateOverTime.mode}，LayaAir 仅支持 Constant 模式，将以常量值 {EvaluateMinMaxCurveConstant(ps.emission.rateOverTime):F1} 导出（曲线数据丢失）"
                 );
             }
 
@@ -882,10 +870,11 @@ namespace LayaExport
             // 注意: 不导出 enable 字段，标准格式中没有这个字段
 
             // 始终导出emissionRate（Laya默认不一定是10，显式导出以确保正确）
-            emissionObj.AddField("emissionRate", emission.rateOverTime.constant);
+            emissionObj.AddField("emissionRate", EvaluateMinMaxCurveConstant(emission.rateOverTime));
 
-            if (emission.rateOverDistance.constant != 0)
-                emissionObj.AddField("emissionRateOverDistance", emission.rateOverDistance.constant);
+            float rateOverDistance = EvaluateMinMaxCurveConstant(emission.rateOverDistance);
+            if (rateOverDistance != 0)
+                emissionObj.AddField("emissionRateOverDistance", rateOverDistance);
 
             // bursts
             if (emission.burstCount > 0)
@@ -988,10 +977,29 @@ namespace LayaExport
                 case ParticleSystemShapeType.ConeVolume:
                 case ParticleSystemShapeType.ConeVolumeShell:
                     // ConeShape: angleDEG(default=25), radius(default=1), length(default=5), emitType(default=0), randomDirection(default=0)
-                    if (shape.angle != 25)
-                        shapeObj.AddField("angleDEG", shape.angle);
-                    if (shape.radius != 1)
-                        shapeObj.AddField("radius", shape.radius);
+                    // Unity Shape.scale 会影响锥体几何形状，LayaAir ConeShape 无 scale 参数，需转换到 angleDEG/radius 上
+                    // scale.z 压缩锥体轴向分量: effectiveAngle = atan2(sin(angle), cos(angle) * scaleZ)
+                    // scale.x/y 缩放底面圆: effectiveRadius = radius * avg(scaleX, scaleY)
+                    float coneAngle = shape.angle;
+                    float coneRadius = shape.radius;
+                    Vector3 coneScale = shape.scale;
+                    if (coneScale.z != 1f || coneScale.x != 1f || coneScale.y != 1f)
+                    {
+                        if (coneScale.z != 1f)
+                        {
+                            float angleRad = coneAngle * Mathf.Deg2Rad;
+                            coneAngle = Mathf.Atan2(Mathf.Sin(angleRad), Mathf.Cos(angleRad) * Mathf.Abs(coneScale.z)) * Mathf.Rad2Deg;
+                        }
+                        if (coneScale.x != 1f || coneScale.y != 1f)
+                        {
+                            coneRadius = shape.radius * (coneScale.x + coneScale.y) * 0.5f;
+                        }
+                        Debug.Log($"LayaAir3D: ConeShape scale({coneScale.x}, {coneScale.y}, {coneScale.z}) 已转换 → angleDEG: {shape.angle}→{coneAngle:F1}, radius: {shape.radius}→{coneRadius:F3}");
+                    }
+                    if (coneAngle != 25)
+                        shapeObj.AddField("angleDEG", coneAngle);
+                    if (coneRadius != 1)
+                        shapeObj.AddField("radius", coneRadius);
                     if (shape.length != 5)
                         shapeObj.AddField("length", shape.length);
                     // emitType: 0=Base, 1=BaseShell, 2=Volume, 3=VolumeShell
@@ -1653,8 +1661,8 @@ namespace LayaExport
         /// 从 MinMaxCurve 获取代表性常量值，支持全部四种模式：
         /// Constant      → curve.constant
         /// TwoConstants  → curve.constantMax
-        /// Curve         → curveMultiplier * curve.curve.Evaluate(0f)
-        /// TwoCurves     → curveMultiplier * curve.curveMax.Evaluate(0f)
+        /// Curve         → curveMultiplier * max(curve.curve)
+        /// TwoCurves     → curveMultiplier * max(curve.curveMax)
         /// 这样可避免 Curve 模式下 .constant 永远返回 0 的问题。
         /// </summary>
         private static float EvaluateMinMaxCurveConstant(ParticleSystem.MinMaxCurve curve, float fallback = 0f)
@@ -1666,12 +1674,28 @@ namespace LayaExport
                 case ParticleSystemCurveMode.TwoConstants:
                     return curve.constantMax;
                 case ParticleSystemCurveMode.Curve:
-                    return curve.curveMultiplier * curve.curve.Evaluate(0f);
+                    return curve.curveMultiplier * EvaluateCurveMax(curve.curve);
                 case ParticleSystemCurveMode.TwoCurves:
-                    return curve.curveMultiplier * curve.curveMax.Evaluate(0f);
+                    return curve.curveMultiplier * EvaluateCurveMax(curve.curveMax);
                 default:
                     return fallback;
             }
+        }
+
+        /// <summary>
+        /// 对 AnimationCurve 采样取最大值。
+        /// </summary>
+        private static float EvaluateCurveMax(AnimationCurve curve, int samples = 32)
+        {
+            if (curve == null || curve.length == 0) return 0f;
+            float max = float.MinValue;
+            for (int i = 0; i <= samples; i++)
+            {
+                float t = (float)i / samples;
+                float v = curve.Evaluate(t);
+                if (v > max) max = v;
+            }
+            return max;
         }
 
         private static JSONObject CreateVector3Object(float x, float y, float z)

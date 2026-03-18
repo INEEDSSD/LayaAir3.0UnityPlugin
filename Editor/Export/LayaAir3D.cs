@@ -184,9 +184,6 @@ public class LayaAir3D : EditorWindow
             );
             GUILayout.Space(5);
 
-            // 调试日志开关
-            ExportConfig.EnableDebugLog = GUILayout.Toggle(ExportConfig.EnableDebugLog, "启用调试日志（Enable Debug Logs）");
-
             GUILayout.EndVertical();
             GUILayout.EndHorizontal();
         }
