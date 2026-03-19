@@ -139,7 +139,12 @@ internal class AnimatorController2DFile : FileData
             AnimationClip clip = state.motion as AnimationClip;
             if (clip != null)
             {
-                stateNode.AddField("loop", clip.isLooping ? -1 : 0);
+                if (!clip.isLooping)
+                {
+                    stateNode.AddField("loopState", 2); // setLoopCount
+                    stateNode.AddField("loopCount", 1);
+                    stateNode.AddField("loop", 1);
+                }
 
                 // Only export .mc for clips with SpriteRenderer color curves matching targetPath
                 if (HasSpriteColorCurves(clip, targetPath))
