@@ -910,17 +910,16 @@ internal class ResoureMap
         if (pixelWidth < 1) pixelWidth = 1;
         if (pixelHeight < 1) pixelHeight = 1;
 
-        // 创建或获取 2D Image 预制体文件（使用缓存的纹理和名称）
-        string texturePath     = AssetsUtil.GetTextureFile(spriteTexture);
-        string spritePrefabKey = GetSpritePrefabVirtualPath(texturePath, spriteName);
-
         // Check for color animation on this SpriteRenderer — export as Animator2D with full state machine
         // Source 1: Animator on the same GameObject (binding.path == "")
         // Source 2: Ancestor Animator targeting this child (binding.path != "", collected in m_spriteColorAnimTargets)
-        JSONObject animationData = null;
+        // NOTE: Animation detection must happen BEFORE prefab key generation so we can
+        //       include a variant suffix — two SpriteRenderers sharing the same sprite but
+        //       with different colors or different AnimatorControllers need separate prefabs.
         AnimatorController ac = null;
         string colorTargetPath = "";
         GameObject animatorGO = spriteRenderer.gameObject;
+        bool hasColorAnim = false;
 
         // Check same-GO Animator first
         Animator animator = spriteRenderer.GetComponent<Animator>();
@@ -941,38 +940,48 @@ internal class ResoureMap
 
         if (ac != null)
         {
-            if (!AnimatorController2DFile.HasAnySpriteColorCurves(ac, colorTargetPath))
+            hasColorAnim = AnimatorController2DFile.HasAnySpriteColorCurves(ac, colorTargetPath);
+            if (!hasColorAnim)
             {
                 Debug.Log($"[LayaAir Export 2D] '{spriteRenderer.gameObject.name}': AnimatorController '{ac.name}' has no SpriteRenderer m_Color curves for path '{colorTargetPath}'");
-            }
-            else
-            {
-                // Build .mcc path alongside the sprite prefab .lh
-                string mccPath = GetSpritePrefabVirtualPath(texturePath, spriteName)
-                    .Replace(".lh", ".mcc");
-
-                if (!this.HaveFileData(mccPath))
-                {
-                    this.AddExportFile(new AnimatorController2DFile(mccPath, ac,
-                        animatorGO, this, colorTargetPath));
-                }
-                AnimatorController2DFile ctrlFile = this.GetFileData(mccPath) as AnimatorController2DFile;
-
-                if (ctrlFile != null)
-                {
-                    animationData = new JSONObject(JSONObject.Type.OBJECT);
-                    animationData.AddField("_$type", "Animator2D");
-                    JSONObject ctrlRef = new JSONObject(JSONObject.Type.OBJECT);
-                    ctrlRef.AddField("_$uuid", ctrlFile.uuid);
-                    ctrlRef.AddField("_$type", "AnimatorController2D");
-                    animationData.AddField("controller", ctrlRef);
-                    Debug.Log($"[LayaAir Export 2D] '{spriteRenderer.gameObject.name}': Animator2D exported, controller UUID={ctrlFile.uuid}, mccPath={mccPath}, targetPath='{colorTargetPath}'");
-                }
             }
         }
         else
         {
             Debug.Log($"[LayaAir Export 2D] '{spriteRenderer.gameObject.name}': No color animation source found");
+        }
+
+        // 创建或获取 2D Image 预制体文件（使用缓存的纹理和名称）
+        // Compute a variant suffix so that SpriteRenderers with the same sprite but different
+        // colors or different AnimatorControllers get separate .lh / .mcc files.
+        string texturePath     = AssetsUtil.GetTextureFile(spriteTexture);
+        string variantSuffix   = GetSpriteVariantSuffix(spriteRenderer.gameObject, animatorGO, spriteColor, hasColorAnim ? ac : null);
+        string spritePrefabKey = GetSpritePrefabVirtualPath(texturePath, spriteName, variantSuffix);
+
+        // Build animation data if color curves exist
+        JSONObject animationData = null;
+        if (hasColorAnim && ac != null)
+        {
+            // Build .mcc path alongside the sprite prefab .lh
+            string mccPath = spritePrefabKey.Replace(".lh", ".mcc");
+
+            if (!this.HaveFileData(mccPath))
+            {
+                this.AddExportFile(new AnimatorController2DFile(mccPath, ac,
+                    animatorGO, this, colorTargetPath));
+            }
+            AnimatorController2DFile ctrlFile = this.GetFileData(mccPath) as AnimatorController2DFile;
+
+            if (ctrlFile != null)
+            {
+                animationData = new JSONObject(JSONObject.Type.OBJECT);
+                animationData.AddField("_$type", "Animator2D");
+                JSONObject ctrlRef = new JSONObject(JSONObject.Type.OBJECT);
+                ctrlRef.AddField("_$uuid", ctrlFile.uuid);
+                ctrlRef.AddField("_$type", "AnimatorController2D");
+                animationData.AddField("controller", ctrlRef);
+                Debug.Log($"[LayaAir Export 2D] '{spriteRenderer.gameObject.name}': Animator2D exported, controller UUID={ctrlFile.uuid}, mccPath={mccPath}, targetPath='{colorTargetPath}'");
+            }
         }
 
         // Detect whether the sprite is a sub-region of its texture (spritesheet/atlas case).
@@ -1005,8 +1014,6 @@ internal class ResoureMap
                                                       spriteName, pixelWidth, pixelHeight,
                                                       spriteColor, materialUUID, animationData));
 
-                // Ensure a FileConfigFile exists so AtlasInfoManager can find the sub-textures
-                EnsureFileConfigFile();
             }
             else
             {
@@ -1090,12 +1097,34 @@ internal class ResoureMap
         return m_syncScriptFile.uuid;
     }
 
-    private string GetSpritePrefabVirtualPath(string texturePath, string spriteName)
+    private string GetSpritePrefabVirtualPath(string texturePath, string spriteName, string variantSuffix = "")
     {
         string texName = System.IO.Path.GetFileNameWithoutExtension(texturePath);
         string cleanName = GameObjectUitls.cleanIllegalChar(spriteName, true);
         string dir = string.IsNullOrEmpty(m_sceneDir) ? "_ui2d_prefabs" : m_sceneDir + "/_ui2d_prefabs";
-        return dir + "/" + texName + "_" + cleanName + "_sprite.lh";
+        if (string.IsNullOrEmpty(variantSuffix))
+            return dir + "/" + texName + "_" + cleanName + "_sprite.lh";
+        return dir + "/" + texName + "_" + cleanName + "_" + variantSuffix + "_sprite.lh";
+    }
+
+    /// <summary>
+    /// Compute a variant suffix for a SpriteRenderer so that instances with different
+    /// initial colors or different AnimatorControllers produce separate prefab files.
+    /// Returns "" when the sprite uses default white color and has no color animation.
+    /// Uses the Animator node name as suffix (in prefabs, Animator is typically at or near root).
+    /// </summary>
+    private string GetSpriteVariantSuffix(GameObject spriteGO, GameObject animatorGO, Color color, AnimatorController ac)
+    {
+        bool isDefaultColor = Mathf.Approximately(color.r, 1f) && Mathf.Approximately(color.g, 1f)
+                           && Mathf.Approximately(color.b, 1f) && Mathf.Approximately(color.a, 1f);
+        bool hasAnim = ac != null;
+
+        if (isDefaultColor && !hasAnim)
+            return "";
+
+        // Use the Animator node name — short and unique enough within a prefab
+        string nodeName = (hasAnim && animatorGO != null) ? animatorGO.name : spriteGO.name;
+        return GameObjectUitls.cleanIllegalChar(nodeName, true);
     }
 
     /// <summary>
