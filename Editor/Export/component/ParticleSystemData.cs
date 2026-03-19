@@ -6,7 +6,8 @@ internal class ParticleSystemData
     {
         JSONObject dataObject = new JSONObject(JSONObject.Type.OBJECT);
         JsonUtils.SetComponentsType(dataObject, "PlusBurst");
-        dataObject.AddField("cycleCount", burst.cycleCount);
+        // Unity: cycleCount=0 表示 Infinite; Laya: -1 表示 Infinite
+        dataObject.AddField("cycleCount", burst.cycleCount == 0 ? -1 : burst.cycleCount);
         dataObject.AddField("count", writeMinMaxCurveData(burst.count));
         dataObject.AddField("probability", burst.probability);
         dataObject.AddField("time", burst.time);

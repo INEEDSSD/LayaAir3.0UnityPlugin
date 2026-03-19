@@ -366,6 +366,24 @@ internal class ResoureMap
             // SpriteRenderer nodes use UI3D path: stay as Sprite3D with 3D transform,
             // UI3D component in _$comp handles the 2D rendering.
             node.AddField("_$type", "Sprite3D");
+
+            // UI3D nodes: negate localScale.x to compensate for left-hand→right-hand coordinate flip.
+            // 3D meshes get this compensation via vertex X-negation during mesh export;
+            // UI3D has no exported mesh, so we apply it on the node's transform instead.
+            if (gameObject.GetComponent<SpriteRenderer>() != null)
+            {
+                JSONObject transform = node.GetField("transform");
+                if (transform != null)
+                {
+                    JSONObject localScale = transform.GetField("localScale");
+                    if (localScale != null)
+                    {
+                        float origX = gameObject.transform.localScale.x;
+                        localScale.RemoveField("x");
+                        localScale.AddField("x", -origX);
+                    }
+                }
+            }
         }
 
         JSONObject compents = new JSONObject(JSONObject.Type.ARRAY);
@@ -1052,6 +1070,8 @@ internal class ResoureMap
         compData.AddField("scale", scaleVec);
 
         compData.AddField("billboard", false);
+        compData.AddField("cull", 0); // RenderState.CULL_NONE
+        compData.AddField("renderMode", PropDatasConfig.DetectTransparentRenderMode(sharedMaterial));
 
         return compData;
     }

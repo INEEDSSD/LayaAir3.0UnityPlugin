@@ -291,12 +291,14 @@ public class AnimationCurveGroup
     private Dictionary<uint, float> _timeLists;
     private bool iscameraOrLight;
     private bool parentIsCameraOrLight;
+    private bool isUI3DNode;
     public AnimationCurveGroup(string path, GameObject gameObject, Type type, string conpomentType, string propertyName, KeyFrameValueType keyType)
     {
         this._curveList = new Dictionary<string, CustomClipCurveData>();
         this.iscameraOrLight = GameObjectUitls.isCameraOrLight(gameObject);
         this.parentIsCameraOrLight = gameObject.transform.parent != null &&
             GameObjectUitls.isCameraOrLight(gameObject.transform.parent.gameObject);
+        this.isUI3DNode = gameObject.GetComponent<SpriteRenderer>() != null;
         this._path = path;
         this._gameobject = gameObject;
         this._keyType = keyType;
@@ -519,6 +521,11 @@ public class AnimationCurveGroup
         {
             frameDelegate = writeRotateEuler;
         }
+        else if (this._keyType == KeyFrameValueType.Scale && this.isUI3DNode)
+        {
+            frameDelegate = writeScaleUI3D;
+            Debug.Log($"[LayaAir Export] UI3D scale animation detected for '{this._gameobject.name}', will negate scale.x keyframes");
+        }
         else
         {
             frameDelegate = writeValue;
@@ -563,6 +570,15 @@ public class AnimationCurveGroup
             SpaceUtils.changePostion(ref frame.inTangentNumbers);
             SpaceUtils.changePostion(ref frame.outTangentNumbers);
         }
+        writeValue(frame, ref data, isRotate, parentIsCamOrLight);
+    }
+
+    private static void writeScaleUI3D(FrameData frame, ref AniNodeFrameData data, bool isRotate, bool parentIsCamOrLight)
+    {
+        // UI3D nodes: negate scale.x to match the static transform localScale.x negation
+        frame.valueNumbers[0] *= -1;
+        frame.inTangentNumbers[0] *= -1;
+        frame.outTangentNumbers[0] *= -1;
         writeValue(frame, ref data, isRotate, parentIsCamOrLight);
     }
 
