@@ -72,19 +72,6 @@ internal class SpriteAtlasExportFile : FileData
         return this.uuid + "@" + spriteName;
     }
 
-    /// <summary>
-    /// Atlas prefix path: base path + "/" (e.g. "Assets/Textures/myTex/").
-    /// Used as meta.prefix in the atlas JSON.
-    /// Sub-textures are cached at prefix + spriteName (e.g. "Assets/Textures/myTex/spriteName").
-    /// </summary>
-    internal string GetAtlasPrefix()
-    {
-        string path = this.filePath; // e.g. "Assets/Textures/myTex.atlas"
-        int dotIndex = path.LastIndexOf('.');
-        string basePath = dotIndex >= 0 ? path.Substring(0, dotIndex) : path;
-        return basePath + "/";
-    }
-
     public IEnumerable<string> frameNames { get { return m_frames.Keys; } }
 
     protected override string getOutFilePath(string path)
@@ -128,8 +115,6 @@ internal class SpriteAtlasExportFile : FileData
         JSONObject meta = new JSONObject(JSONObject.Type.OBJECT);
         // image: relative filename — AtlasLoader joins with folderPath to load the texture
         meta.AddField("image", m_textureFileName);
-        // prefix: atlas relative path + "@" — sub-textures cached at "basePath@spriteName"
-        meta.AddField("prefix", GetAtlasPrefix());
         root.AddField("meta", meta);
 
         // Write file

@@ -8,7 +8,7 @@ using System.IO;
 ///
 /// Format:
 /// {
-///   "path/to/texture.atlas": ["prefix/", ["spriteName1", "spriteName2"]]
+///   "path/to/texture.atlas": ["spriteName1", "spriteName2"]
 /// }
 /// </summary>
 internal class FileConfigFile : FileData
@@ -35,19 +35,15 @@ internal class FileConfigFile : FileData
             SpriteAtlasExportFile atlasFile = kv.Value as SpriteAtlasExportFile;
             if (atlasFile == null) continue;
 
-            // Build the entry: [prefix, [frameName1, frameName2, ...]]
-            JSONObject entry = new JSONObject(JSONObject.Type.ARRAY);
-            entry.Add(atlasFile.GetAtlasPrefix());
-
+            // Build the entry: [frameName1, frameName2, ...]
             JSONObject frameNames = new JSONObject(JSONObject.Type.ARRAY);
             foreach (string name in atlasFile.frameNames)
             {
                 frameNames.Add(name);
             }
-            entry.Add(frameNames);
 
             // Key is the atlas file path
-            root.AddField(atlasFile.filePath, entry);
+            root.AddField(atlasFile.filePath, frameNames);
             hasEntries = true;
         }
 
