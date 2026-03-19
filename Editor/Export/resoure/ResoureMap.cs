@@ -963,12 +963,11 @@ internal class ResoureMap
                            && Mathf.Approximately(spriteRect.width, texFullWidth)
                            && Mathf.Approximately(spriteRect.height, texFullHeight));
 
-        // Detect SpriteRenderer material blend mode and generate matching default material
-        int spriteRenderMode = PropDatasConfig.DetectTransparentRenderMode(sharedMaterial);
-        string defaultMatPath = Mesh2DDefaultMaterialFile.GetVirtualPath(spriteRenderMode);
+        // Generate or retrieve the default baseRender2D material for Mesh2DRender
+        string defaultMatPath = "Assets/Mesh2DRender_DefaultMaterial.lmat";
         if (!this.HaveFileData(defaultMatPath))
         {
-            this.AddExportFile(new Mesh2DDefaultMaterialFile(spriteRenderMode));
+            this.AddExportFile(new Mesh2DDefaultMaterialFile());
         }
         Mesh2DDefaultMaterialFile matFile = this.GetFileData(defaultMatPath) as Mesh2DDefaultMaterialFile;
         string materialUUID = matFile != null ? matFile.uuid : null;
@@ -1044,12 +1043,11 @@ internal class ResoureMap
         compData.AddField("prefab", prefabRef);
 
         compData.AddField("cameraSpace", false);
-        compData.AddField("renderMode", spriteRenderMode);
         compData.AddField("resolutionRate", resolutionRate);
 
         JSONObject scaleVec = new JSONObject(JSONObject.Type.OBJECT);
         scaleVec.AddField("_$type", "Vector2");
-        scaleVec.AddField("x", -scaleX);
+        scaleVec.AddField("x", scaleX);
         scaleVec.AddField("y", scaleY);
         compData.AddField("scale", scaleVec);
 
