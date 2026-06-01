@@ -1,0 +1,71 @@
+{
+  "version": "1.0.0",
+  "name": "Project Custom Mappings Example",
+  "description": "示例：项目自定义映射表。将此文件复制到 ProjectSettings/LayaShaderMappings.json 来启用自定义规则",
+
+  "mappings": {
+    "types": [
+      {
+        "from": "MyCustomType",
+        "to": "vec4",
+        "context": "all",
+        "priority": 200,
+        "description": "项目自定义类型示例"
+      }
+    ],
+
+    "functions": [
+      {
+        "from": "MyProjectEffect({0}, {1})",
+        "to": "customEffect({0}, {1})",
+        "context": "fragment",
+        "priority": 200,
+        "description": "项目特定的效果函数"
+      },
+      {
+        "from": "ProjectGlow({0})",
+        "to": "pow({0}, vec3(2.2))",
+        "context": "fragment",
+        "priority": 200,
+        "description": "项目的Glow效果"
+      }
+    ],
+
+    "variables": [
+      {
+        "from": "_ProjectGlobalTime",
+        "to": "u_CurrentTime",
+        "context": "all",
+        "priority": 200,
+        "description": "项目全局时间变量"
+      },
+      {
+        "from": "_CustomLightDir",
+        "to": "u_DirectionLight.direction",
+        "context": "all",
+        "priority": 200,
+        "description": "项目自定义光照方向"
+      }
+    ],
+
+    "patterns": [
+      {
+        "name": "custom_matrix_transform",
+        "pattern": "CustomTransform\\s*\\(\\s*([^)]+)\\s*\\)",
+        "replacement": "(u_World * vec4($1, 1.0)).xyz",
+        "context": "vertex",
+        "priority": 200,
+        "description": "项目自定义的矩阵变换"
+      }
+    ],
+
+    "custom_functions": [
+      {
+        "name": "customEffect",
+        "code": "vec3 customEffect(vec3 color, float intensity) { return color * intensity * 2.0; }",
+        "description": "项目自定义效果函数的GLSL实现",
+        "priority": 200
+      }
+    ]
+  }
+}

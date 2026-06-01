@@ -1,0 +1,410 @@
+{
+    "_comment": "CPU Particle material override config. Entries here override MetarialPropData.json when exporting in CPU particle mode. Shaders not listed here fall back to the main config.",
+
+    "Particles/Standard Unlit": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            },
+            {
+                "uName": "_EmissionMap",
+                "layaName": "u_EmissionTexture",
+                "defind": "EMISSIONTEXTURE"
+            }
+        ],
+        "colors": [
+            {
+                "uName": "_Color",
+                "layaName": "u_AlbedoColor",
+                "hdrName": "u_AlbedoColorIntensity"
+            },
+            {
+                "uName": "_EmissionColor",
+                "layaName": "u_EmissionColor",
+                "hdrName": "u_EmissionColorIntensity"
+            }
+        ],
+        "tillOffset": [
+            {
+                "uName": "_MainTex_ST",
+                "layaName": "u_TilingOffset"
+            }
+        ],
+        "floats": [
+            {
+                "uName": "_BumpScale",
+                "layaName": "u_NormalScale"
+            }
+        ],
+        "defineds": [
+            {
+                "uName": "_EMISSION",
+                "layaName": "EMISSION",
+                "from": 1
+            }
+        ]
+    },
+
+    "Particles/Standard Surface": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            },
+            {
+                "uName": "_EmissionMap",
+                "layaName": "u_EmissionTexture",
+                "defind": "EMISSIONTEXTURE"
+            },
+            {
+                "uName": "_MetallicGlossMap",
+                "layaName": "u_MetallicGlossMap",
+                "defind": "METALLICGLOSSMAP"
+            },
+            {
+                "uName": "_BumpMap",
+                "layaName": "u_NormalMap",
+                "defind": "DETAILNORMAL"
+            }
+        ],
+        "colors": [
+            {
+                "uName": "_Color",
+                "layaName": "u_AlbedoColor",
+                "hdrName": "u_AlbedoColorIntensity"
+            },
+            {
+                "uName": "_EmissionColor",
+                "layaName": "u_EmissionColor",
+                "hdrName": "u_EmissionColorIntensity"
+            }
+        ],
+        "tillOffset": [
+            {
+                "uName": "_MainTex_ST",
+                "layaName": "u_TilingOffset"
+            }
+        ],
+        "floats": [
+            {
+                "uName": "_Metallic",
+                "layaName": "u_Metallic"
+            },
+            {
+                "uName": "_Glossiness",
+                "layaName": "u_Smoothness"
+            },
+            {
+                "uName": "_BumpScale",
+                "layaName": "u_NormalScale"
+            }
+        ],
+        "defineds": [
+            {
+                "uName": "_EMISSION",
+                "layaName": "EMISSION",
+                "from": 1
+            }
+        ]
+    },
+
+    "Mobile/Particles/Additive": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Mobile/Particles/Alpha Blended": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Mobile/Particles/Multiply": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Particles/Additive": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Particles/Alpha Blended": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Particles/Alpha Blended Premultiply": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Particles/Multiply": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Legacy Shaders/Particles/Additive": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Legacy Shaders/Particles/Alpha Blended": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Legacy Shaders/Particles/Alpha Blended Premultiply": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Legacy Shaders/Particles/VertexLit Blended": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Legacy Shaders/Particles/Multiply": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Legacy Shaders/Particles/Multiply (Double)": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_MainTex",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            }
+        ]
+    },
+
+    "Universal Render Pipeline/Particles/Unlit": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_BaseMap",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            },
+            {
+                "uName": "_EmissionMap",
+                "layaName": "u_EmissionTexture",
+                "defind": "EMISSIONTEXTURE"
+            }
+        ],
+        "colors": [
+            {
+                "uName": "_BaseColor",
+                "layaName": "u_AlbedoColor",
+                "hdrName": "u_AlbedoColorIntensity"
+            },
+            {
+                "uName": "_EmissionColor",
+                "layaName": "u_EmissionColor",
+                "hdrName": "u_EmissionColorIntensity"
+            }
+        ],
+        "tillOffset": [
+            {
+                "uName": "_BaseMap_ST",
+                "layaName": "u_TilingOffset"
+            }
+        ]
+    },
+
+    "Universal Render Pipeline/Particles/Lit": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_BaseMap",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            },
+            {
+                "uName": "_BumpMap",
+                "layaName": "u_NormalMap",
+                "defind": "DETAILNORMAL",
+                "isNormal": true
+            },
+            {
+                "uName": "_MetallicGlossMap",
+                "layaName": "u_MetallicGlossMap",
+                "defind": "METALLICGLOSSMAP"
+            },
+            {
+                "uName": "_EmissionMap",
+                "layaName": "u_EmissionTexture",
+                "defind": "EMISSIONTEXTURE"
+            }
+        ],
+        "colors": [
+            {
+                "uName": "_BaseColor",
+                "layaName": "u_AlbedoColor",
+                "hdrName": "u_AlbedoColorIntensity"
+            },
+            {
+                "uName": "_EmissionColor",
+                "layaName": "u_EmissionColor",
+                "hdrName": "u_EmissionColorIntensity"
+            }
+        ],
+        "tillOffset": [
+            {
+                "uName": "_BaseMap_ST",
+                "layaName": "u_TilingOffset"
+            }
+        ],
+        "floats": [
+            {
+                "uName": "_Metallic",
+                "layaName": "u_Metallic"
+            },
+            {
+                "uName": "_Smoothness",
+                "layaName": "u_Smoothness"
+            },
+            {
+                "uName": "_BumpScale",
+                "layaName": "u_NormalScale"
+            }
+        ]
+    },
+
+    "Universal Render Pipeline/Particles/Simple Lit": {
+        "targeName": "CpuParticle3D",
+        "textures": [
+            {
+                "uName": "_BaseMap",
+                "layaName": "u_AlbedoTexture",
+                "defind": "ALBEDOTEXTURE"
+            },
+            {
+                "uName": "_BumpMap",
+                "layaName": "u_NormalMap",
+                "defind": "DETAILNORMAL",
+                "isNormal": true
+            },
+            {
+                "uName": "_EmissionMap",
+                "layaName": "u_EmissionTexture",
+                "defind": "EMISSIONTEXTURE"
+            },
+            {
+                "uName": "_SpecGlossMap",
+                "layaName": "u_SpecGlossMap",
+                "defind": "SPECGLOSSMAP"
+            }
+        ],
+        "colors": [
+            {
+                "uName": "_BaseColor",
+                "layaName": "u_AlbedoColor",
+                "hdrName": "u_AlbedoColorIntensity"
+            },
+            {
+                "uName": "_EmissionColor",
+                "layaName": "u_EmissionColor",
+                "hdrName": "u_EmissionColorIntensity"
+            },
+            {
+                "uName": "_SpecColor",
+                "layaName": "u_SpecColor"
+            }
+        ],
+        "tillOffset": [
+            {
+                "uName": "_BaseMap_ST",
+                "layaName": "u_TilingOffset"
+            }
+        ],
+        "floats": [
+            {
+                "uName": "_Smoothness",
+                "layaName": "u_Smoothness"
+            },
+            {
+                "uName": "_BumpScale",
+                "layaName": "u_NormalScale"
+            }
+        ]
+    }
+}

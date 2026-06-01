@@ -1,12 +1,13 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.UI;
 using UnityEditor.SceneManagement;
 using System.IO;
 using UnityEngine.SceneManagement;
 
 
-internal class HierarchyFile 
+internal class HierarchyFile
 {
     private ResoureMap resouremap;
     private NodeMap nodeMap;
@@ -17,7 +18,10 @@ internal class HierarchyFile
         GameObject[] gameObjects = scene.GetRootGameObjects();
         var allNodes = getSceneAllNode(gameObjects);//场景中所有GameObject
         this.resouremap = new ResoureMap();
-        this.nodeMap = this.resouremap.AddNodeMap(2);
+        // Set scene directory for UI2D prefab output path (_ui2d_prefabs/)
+        string sceneLsPath = scene.path.Replace(System.IO.Path.GetExtension(scene.path), ".ls");
+        this.resouremap.SetSceneDir(System.IO.Path.GetDirectoryName(sceneLsPath).Replace("\\", "/"));
+        this.nodeMap = this.resouremap.AddNodeMap(2, sceneMode: true);
        
         foreach (var gameObject in allNodes)//遍历
         {
@@ -43,12 +47,19 @@ internal class HierarchyFile
         {
             return;
         }
+
+        // Canvas 及其子树整体跳过（UI 2D 导出暂未启用）
+        if (gameObject.GetComponent<Canvas>() != null)
+        {
+            return;
+        }
+
         list.Add(gameObject);
         if (gameObject.transform.childCount > 0)
         {
             for (int i = 0; i < gameObject.transform.childCount; i++)
             {
-                AddtoList(gameObject.transform.GetChild(i).gameObject,list);
+                AddtoList(gameObject.transform.GetChild(i).gameObject, list);
             }
         }
     }
@@ -62,13 +73,13 @@ internal class HierarchyFile
         else
         {
             GameObject[] gameObjects = scene.GetRootGameObjects();
-            
+
             // 检查是否启用批量导出一级节点
             if (ExportConfig.BatchMade)
             {
                 // 用于跟踪已使用的文件名，处理同名节点
                 Dictionary<string, int> usedFileNames = new Dictionary<string, int>();
-                
+
                 // 批量导出一级节点：将每个根节点的一级子节点分别导出为独立的 .lh 文件
                 for (int i = 0; i < gameObjects.Length; i++)
                 {
@@ -77,7 +88,7 @@ internal class HierarchyFile
                     {
                         continue;
                     }
-                    
+
                     // 遍历根节点的一级子节点
                     Transform rootTransform = rootObject.transform;
                     for (int j = 0; j < rootTransform.childCount; j++)
@@ -87,7 +98,7 @@ internal class HierarchyFile
                         {
                             continue;
                         }
-                        
+
                         // 生成唯一的文件名，处理同名节点
                         string baseName = GameObjectUitls.cleanIllegalChar(childObject.name, true);
                         string fileName;
@@ -101,8 +112,10 @@ internal class HierarchyFile
                             usedFileNames[baseName] = 0;
                             fileName = baseName + ".lh";
                         }
-                        
-                        this.resouremap.AddExportFile(new JsonFile(fileName, this.nodeMap.getPerfabJson(childObject)));
+
+                        JSONObject perfabJson = this.nodeMap.getPerfabJson(childObject);
+                        addAtlasPreloads(perfabJson);
+                        this.resouremap.AddExportFile(new JsonFile(fileName, perfabJson));
                     }
                 }
             }
@@ -116,16 +129,34 @@ internal class HierarchyFile
                     {
                         continue;
                     }
-                    GameObject perfabRoot = PerfabFile.getPrefabInstanceRoot(gameObject);
-                    if (perfabRoot == null||perfabRoot != gameObject)
-                    {
-                        this.resouremap.AddExportFile(new JsonFile(gameObject.name + ".lh", this.nodeMap.getPerfabJson(gameObject)));
-                    }
+                    JSONObject perfabJson = this.nodeMap.getPerfabJson(gameObject);
+                    addAtlasPreloads(perfabJson);
+                    this.resouremap.AddExportFile(new JsonFile(gameObject.name + ".lh", perfabJson));
                 }
             }
         }
-        
+
         this.resouremap.SaveAllFile();
+    }
+
+    /// <summary>
+    /// Add atlas _$preloads to a root JSON node (scene or prefab) so that
+    /// atlas files are loaded before any sub-texture references are resolved.
+    /// </summary>
+    private void addAtlasPreloads(JSONObject rootNode)
+    {
+        List<string> atlasUUIDs = this.resouremap.GetAtlasFileUUIDs();
+        if (atlasUUIDs.Count == 0) return;
+
+        JSONObject preloads = new JSONObject(JSONObject.Type.ARRAY);
+        JSONObject preloadTypes = new JSONObject(JSONObject.Type.ARRAY);
+        foreach (string atlasUUID in atlasUUIDs)
+        {
+            preloads.Add(atlasUUID);
+            preloadTypes.Add("Atlas");
+        }
+        rootNode.AddField("_$preloads", preloads);
+        rootNode.AddField("_$preloadTypes", preloadTypes);
     }
 
     private void getSceneNode() {
@@ -139,6 +170,9 @@ internal class HierarchyFile
         node.AddField("top", 0);
         node.AddField("bottom", 0);
         node.AddField("name", "Scene2D");
+
+        addAtlasPreloads(node);
+
         JSONObject fchild = new JSONObject(JSONObject.Type.ARRAY);
         node.AddField("_$child", fchild);
         JSONObject scene3dNode = new JSONObject(JSONObject.Type.OBJECT);
@@ -189,19 +223,14 @@ internal class HierarchyFile
 
         GameObject[] gameObjects = scene.GetRootGameObjects();
 
-        if (gameObjects.Length > 0)
+        JSONObject child = new JSONObject(JSONObject.Type.ARRAY);
+        scene3dNode.AddField("_$child", child);
+        for (int i = 0; i < gameObjects.Length; i++)
         {
-            JSONObject child = new JSONObject(JSONObject.Type.ARRAY);
-            scene3dNode.AddField("_$child", child);
-            for (int i = 0; i < gameObjects.Length; i++)
-            {
-                child.Add(this.nodeMap.getJsonObject(gameObjects[i].gameObject));
-            }
+            // Canvas 已在 AddtoList 中被整体跳过，这里不会出现 Canvas 根节点
+            child.Add(this.nodeMap.getJsonObject(gameObjects[i].gameObject));
         }
-        else
-        {
-            scene3dNode.AddField("_$child", new JSONObject(JSONObject.Type.ARRAY));
-        }
+
         this.resouremap.AddExportFile(new JsonFile(sceneName, node));
     }
 }

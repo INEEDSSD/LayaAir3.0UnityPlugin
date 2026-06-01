@@ -16,6 +16,17 @@ internal class MeshFile : FileData
         this.render = render;
     }
 
+    /// <summary>
+    /// 构造函数（支持指定自定义路径）
+    /// 用于程序生成的mesh（如简化后的粒子mesh），需要使用原始mesh的路径
+    /// </summary>
+    public MeshFile(Mesh mesh, Renderer render, string customPath) :base(null)
+    {
+        this.updatePath(customPath);
+        this.m_mesh = mesh;
+        this.render = render;
+    }
+
     public override void SaveFile(Dictionary<string, FileData> exportFiles)
     {
         if (this.m_mesh.uv2.Length > 0 && ExportConfig.AutoVerticesUV1)
