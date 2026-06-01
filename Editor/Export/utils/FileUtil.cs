@@ -191,7 +191,7 @@ namespace Util
             texture.Apply();
             if (!iSLoad)
             {
-                Debug.Log("Texture存在但生成Texture失败");
+                ExportLogger.Warning("LayaAir3D: Texture file exists but LoadImage failed");
             }
         }
 
@@ -201,7 +201,7 @@ namespace Util
             if(path.Length>1)
             {
                 FileUtil.setStatuse(false);
-                Debug.LogError("File Name Clash"+_scriptName+"Get Path ERROR!!");
+                Debug.LogError($"[LayaAir Export] File name clash: multiple files found for '{_scriptName}'");
                 return null;
             }
             string _path = AssetDatabase.GUIDToAssetPath(path[0]).Replace((@"Export" + @"/"+_scriptName+".cs"),"");

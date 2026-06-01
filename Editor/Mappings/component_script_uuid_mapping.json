@@ -1,0 +1,19 @@
+{
+	"_comment":"Unity组件类型到LayaAir脚本UUID的映射配置",
+	"_instructions":[
+		"如何获取LayaAir脚本的UUID：",
+		"1. 在LayaAir项目的src目录中找到对应的TypeScript脚本文件",
+		"2. 找到同名的.meta文件",
+		"3. 打开.meta文件，复制其中的uuid值",
+		"4. 使用菜单 LayaAir > 组件脚本导出配置 打开配置面板添加映射",
+		"",
+		"两种格式均可：",
+		"简单格式（仅UUID，导出所有属性用原名）：\"TypeName\": \"uuid\"",
+		"完整格式（带属性名映射，只导出列出的属性）：",
+		"\"TypeName\": { \"uuid\": \"uuid\", \"properties\": { \"unityName\": \"layaName\" } }"
+	],
+	"mappings":{
+		"LookAtConstraint":"2d4d74ae-3e47-4787-8343-0a5463085f0f",
+		"EffectDelay":"5f506783-e034-497d-b8d3-1cae14857490"
+	}
+}

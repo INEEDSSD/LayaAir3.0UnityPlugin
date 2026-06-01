@@ -8,50 +8,169 @@ internal class MaterialFile : JsonFile
 {
     private Material m_material;
     private bool m_isBuiltinParticleMaterial = false;
-    
-    public MaterialFile(ResoureMap map, Material material) : base(null,new JSONObject(JSONObject.Type.OBJECT))
+    private bool m_isCPUParticle = false;
+    private HashSet<System.Type> m_rendererTypes = new HashSet<System.Type>();
+    private bool m_isParticleMeshMode = false; // ⭐ Track if particle uses mesh rendering mode
+    private bool m_isUsedBy2DComponent = false; // ★ Track if used by 2D/UI component (SpriteRenderer or Image)
+
+    public MaterialFile(ResoureMap map, Material material, Renderer renderer = null,
+        string pathOverride = null, bool is2DUsage = false, bool isCPUParticle = false) : base(null,new JSONObject(JSONObject.Type.OBJECT))
     {
         this.resoureMap = map;
         this.m_material = material;
-        
+        this.m_isCPUParticle = isCPUParticle;
+
+        // ★ 2D 标记必须在 WriteMetarial 之前设置（Image 没有 Renderer，靠此参数传入）
+        if (is2DUsage)
+        {
+            m_isUsedBy2DComponent = true;
+        }
+
+        // Track which type of renderer uses this material
+        if (renderer != null)
+        {
+            m_rendererTypes.Add(renderer.GetType());
+
+            // ⭐ Check if this is a ParticleSystemRenderer in mesh mode
+            ParticleSystemRenderer particleRenderer = renderer as ParticleSystemRenderer;
+            if (particleRenderer != null)
+            {
+                ParticleSystemRenderMode renderMode = particleRenderer.renderMode;
+                if (renderMode == ParticleSystemRenderMode.Mesh)
+                {
+                    m_isParticleMeshMode = true;
+                    ExportLogger.Log($"LayaAir3D: Particle system '{renderer.gameObject.name}' uses MESH render mode");
+                }
+            }
+
+            // ★ Check if used by SpriteRenderer (2D component)
+            if (renderer is SpriteRenderer)
+            {
+                m_isUsedBy2DComponent = true;
+            }
+        }
+
         // 检查是否是内置粒子材质
         string materialPath = AssetDatabase.GetAssetPath(material.GetInstanceID());
         bool isBuiltinResource = ResoureMap.IsBuiltinResource(materialPath);
         bool isParticleMaterial = IsParticleShader(material.shader.name);
-        
-        if (isBuiltinResource && isParticleMaterial)
+        bool isUsedByParticle = renderer is ParticleSystemRenderer;
+
+        // CPU 粒子模式：使用独立路径和 CPU 覆盖配置表
+        if (isCPUParticle)
         {
-            // 内置粒子材质使用模板
+            string cpuPath = AssetsUtil.GetMaterialPath(material) + "#cpu";
+            this.updatePath(cpuPath);
+            MetarialUitls.WriteMetarial(material, this.jsonData, map, this, true);
+        }
+        // 内置资源 + (粒子shader 或 粒子渲染器使用) → 导出为Laya Shuriken粒子材质
+        else if (isBuiltinResource && (isParticleMaterial || isUsedByParticle))
+        {
             m_isBuiltinParticleMaterial = true;
-            this.updatePath(AssetsUtil.GetMaterialPath(material));
+            this.updatePath(pathOverride ?? AssetsUtil.GetMaterialPath(material));
             WriteBuiltinParticleMaterial(material, this.jsonData, map);
         }
         else
         {
-            this.updatePath(AssetsUtil.GetMaterialPath(material));
+            this.updatePath(pathOverride ?? AssetsUtil.GetMaterialPath(material));
             if(material.shader.name == "Skybox/6 Sided")
             {
                 MetarialUitls.WriteSkyMetarial(material, this.jsonData, map);
             }
             else
             {
-                MetarialUitls.WriteMetarial(material, this.jsonData, map);
+                MetarialUitls.WriteMetarial(material, this.jsonData, map, this);
             }
         }
     }
-    
+
     /// <summary>
-    /// 检查是否是粒子相关的 Shader
+    /// Add a renderer type that uses this material (called when material is reused)
+    /// </summary>
+    public void AddRendererUsage(Renderer renderer)
+    {
+        if (renderer != null)
+        {
+            m_rendererTypes.Add(renderer.GetType());
+
+            // ⭐ Check if this is a ParticleSystemRenderer in mesh mode
+            ParticleSystemRenderer particleRenderer = renderer as ParticleSystemRenderer;
+            if (particleRenderer != null)
+            {
+                ParticleSystemRenderMode renderMode = particleRenderer.renderMode;
+                if (renderMode == ParticleSystemRenderMode.Mesh)
+                {
+                    m_isParticleMeshMode = true;
+                    ExportLogger.Log($"LayaAir3D: Particle system '{renderer.gameObject.name}' uses MESH render mode");
+                }
+            }
+
+            // ★ Check if used by SpriteRenderer (2D component)
+            if (renderer is SpriteRenderer)
+            {
+                m_isUsedBy2DComponent = true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 标记此材质被 2D/UI 组件使用（如 Image，没有 Renderer 组件）
+    /// </summary>
+    public void MarkAs2DUsage()
+    {
+        m_isUsedBy2DComponent = true;
+    }
+
+    /// <summary>
+    /// 检查此材质是否被 2D/UI 组件使用（SpriteRenderer 或 Image）
+    /// </summary>
+    public bool IsUsedBy2DComponent()
+    {
+        return m_isUsedBy2DComponent;
+    }
+
+    /// <summary>
+    /// 检查此材质是否用于 CPU 粒子导出
+    /// </summary>
+    public bool IsCPUParticle() => m_isCPUParticle;
+
+    /// <summary>
+    /// Check if this material is used by ParticleSystemRenderer
+    /// </summary>
+    public bool IsUsedByParticleSystem()
+    {
+        return m_rendererTypes.Contains(typeof(ParticleSystemRenderer));
+    }
+
+    /// <summary>
+    /// Check if this material is used by MeshRenderer or SkinnedMeshRenderer
+    /// </summary>
+    public bool IsUsedByMeshRenderer()
+    {
+        return m_rendererTypes.Contains(typeof(MeshRenderer)) ||
+               m_rendererTypes.Contains(typeof(SkinnedMeshRenderer));
+    }
+
+    /// <summary>
+    /// ⭐ Check if this material is used by ParticleSystemRenderer in MESH rendering mode
+    /// </summary>
+    public bool IsParticleMeshMode()
+    {
+        return m_isParticleMeshMode;
+    }
+
+    /// <summary>
+    /// 检查是否是 Unity 内置粒子 Shader
+    /// 仅用于内置材质检测，所有 Unity 内置粒子 shader 名称都包含 "particle"
+    /// 例如: "Particles/Standard Unlit", "Mobile/Particles/Additive",
+    ///       "Legacy Shaders/Particles/Alpha Blended", "Universal Render Pipeline/Particles/*"
     /// </summary>
     private static bool IsParticleShader(string shaderName)
     {
         if (string.IsNullOrEmpty(shaderName))
             return false;
-            
-        string lowerName = shaderName.ToLower();
-        return lowerName.Contains("particle") || 
-               lowerName.Contains("additive") ||
-               lowerName.Contains("alpha blended");
+
+        return shaderName.ToLower().Contains("particle");
     }
     
     /// <summary>
@@ -67,24 +186,21 @@ internal class MaterialFile : JsonFile
         JSONObject props = new JSONObject(JSONObject.Type.OBJECT);
         jsonData.AddField("props", props);
         
-        // 纹理数组 - 内置材质通常没有可导出的纹理，添加空占位符
+        // 纹理数组 - 内置材质通常没有可导出的纹理，保持空数组（shader uniformMap 会使用 "white" 默认值）
         JSONObject textures = new JSONObject(JSONObject.Type.ARRAY);
-        JSONObject emptyTexture = new JSONObject(JSONObject.Type.OBJECT);
-        emptyTexture.AddField("name", "u_texture");
-        textures.Add(emptyTexture);
         props.AddField("textures", textures);
-        
-        // 材质类型
+
+        // 使用 Laya 内置粒子材质类型
         props.AddField("type", "PARTICLESHURIKEN");
         
         // 渲染队列
         props.AddField("renderQueue", material.renderQueue > 0 ? material.renderQueue : 3000);
         
-        // 材质渲染模式 - 2=透明/Additive
-        props.AddField("materialRenderMode", 2);
+        // 材质渲染模式 - 通过混合因子自动区分 Additive(3) / AlphaBlend(2)
+        props.AddField("materialRenderMode", PropDatasConfig.DetectTransparentRenderMode(material));
         
-        // 剔除模式
-        int cullMode = 2;
+        // 剔除模式 - 粒子默认双面 (0=Off, 1=Front, 2=Back)
+        int cullMode = 0; // 默认 Off
         if (material.HasProperty("_Cull"))
         {
             cullMode = material.GetInt("_Cull");
@@ -155,33 +271,31 @@ internal class MaterialFile : JsonFile
         colorValue.Add(tintColor.b);
         colorValue.Add(tintColor.a);
         props.AddField("u_Tintcolor", colorValue);
-        
+
         // Defines
         JSONObject defines = new JSONObject(JSONObject.Type.ARRAY);
         defines.Add("TINTCOLOR");
+
+        // ⭐ Add RENDERMODE_MESH define for particle mesh rendering mode
+        if (m_isParticleMeshMode)
+        {
+            defines.Add("RENDERMODE_MESH");
+            ExportLogger.Log($"LayaAir3D: Added RENDERMODE_MESH define for built-in particle material in mesh mode");
+        }
+
         props.AddField("defines", defines);
     }
     
     /// <summary>
     /// Unity BlendMode 转换为 LayaAir BlendFactor
     /// </summary>
+    /// <summary>
+    /// Unity BlendMode 整数值 → Laya BlendFactor 整数值。
+    /// 通过运行时枚举名称映射，兼容不同 Unity 版本中枚举整数值不同的情况。
+    /// </summary>
     private static int ConvertUnityBlendToLaya(int unityBlend)
     {
-        switch (unityBlend)
-        {
-            case 0: return 0;  // Zero
-            case 1: return 1;  // One
-            case 2: return 4;  // DstColor
-            case 3: return 2;  // SrcColor
-            case 4: return 5;  // OneMinusDstColor
-            case 5: return 6;  // SrcAlpha
-            case 6: return 3;  // OneMinusSrcColor
-            case 7: return 8;  // DstAlpha
-            case 8: return 9;  // OneMinusDstAlpha
-            case 9: return 6;  // SrcAlphaSaturate -> SrcAlpha
-            case 10: return 7; // OneMinusSrcAlpha
-            default: return 1;
-        }
+        return CustomShaderExporter.UnityBlendToLaya(unityBlend);
     }
 
     protected override string getOutFilePath(string path)
@@ -190,10 +304,17 @@ internal class MaterialFile : JsonFile
         {
             return "default_material.lmat";
         }
+        // Remove #cpu cache suffix before generating output path
+        string cleanPath = path;
+        if (cleanPath.EndsWith("#cpu"))
+        {
+            cleanPath = cleanPath.Substring(0, cleanPath.Length - 4);
+        }
         // 修复：安全地获取不带扩展名的路径
-        int dotIndex = path.LastIndexOf('.');
-        string basePath = dotIndex >= 0 ? path.Substring(0, dotIndex) : path;
-        return GameObjectUitls.cleanIllegalChar(basePath, false) + ".lmat";
+        int dotIndex = cleanPath.LastIndexOf('.');
+        string basePath = dotIndex >= 0 ? cleanPath.Substring(0, dotIndex) : cleanPath;
+        string suffix = m_isCPUParticle ? "_cpu" : "";
+        return GameObjectUitls.cleanIllegalChar(basePath, false) + suffix + ".lmat";
     }
 
     public override void SaveFile(Dictionary<string, FileData> exportFiles)
